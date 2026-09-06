@@ -19,11 +19,11 @@ GitHub Actions、Claude Code、Codex、OpenCodeを利用した汎用AI PRレビ�
 
 ## Agent Roles
 
-- Claude Code: Main Implementer。Planを実装する。Planの技術的誤り・公式仕様との不一致・重大なsecurity問題は実装せず報告する。
-- Codex: Plan Owner / Cross Reviewer。GitHub上で`@codex review`による独立レビューを行う。
+- Codex: Owner / Implementer。Planを所有・実装し、GitHub上で`@codex review`による独立レビューも行う。
+- Claude Code: 設計・コード・security Reviewer。
 - OpenCode + local LLM: Auxiliary Reviewer。読み取り専用で補助的なレビューを行う。
 
-同一レビューを複数Agentへ重複依頼しない。Claudeのレビュー結果をCodexへ事前に渡さない。
+Planの技術的誤り・公式仕様との不一致・重大なsecurity問題を発見したAgentは、実装せず報告する。セッション単位で役割を一時的に入れ替える指示があっても、本ファイルの定義は変更しない。同一レビューを複数Agentへ重複依頼しない。Claudeのレビュー結果をCodexへ事前に渡さない。
 
 ## Language
 

@@ -53,6 +53,60 @@ def _claude_permissions():
     return data["permissions"]
 
 
+def _claude_bash_rule_matches(rule, command):
+    """Model of documented Bash rule semantics: exact match, trailing ':*' / ' *' prefix,
+    '*' wildcard at any position. Used to test our own config, not Claude Code itself."""
+    m = re.fullmatch(r"Bash\((.*)\)", rule)
+    if not m:
+        return False
+    pattern = m.group(1)
+    if pattern.endswith(":*"):
+        pattern = pattern[:-2] + " *"
+    if pattern.endswith(" *"):
+        prefix = pattern[:-2]
+        return command == prefix or command.startswith(prefix + " ")
+    if "*" in pattern:
+        return re.fullmatch(".*".join(map(re.escape, pattern.split("*"))), command) is not None
+    return command == pattern
+
+
+def _claude_decision(command):
+    """deny > ask > allow precedence; None when no rule matches (prompt by default).
+    Compound commands are split and every part must be allowed for the whole to be."""
+    perms = _claude_permissions()
+    parts = [p.strip() for p in re.split(r"&&|\|\||;|\|", command) if p.strip()]
+    decisions = []
+    for part in parts:
+        decision = None
+        for level in ("deny", "ask", "allow"):
+            if any(_claude_bash_rule_matches(r, part) for r in perms[level]):
+                decision = level
+                break
+        decisions.append(decision)
+    if "deny" in decisions:
+        return "deny"
+    if "ask" in decisions:
+        return "ask"
+    if all(d == "allow" for d in decisions):
+        return "allow"
+    return None
+
+
+def _glob_match(pattern, text):
+    regex = "".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in pattern)
+    return re.fullmatch(regex, text) is not None
+
+
+def _opencode_bash_decision(command):
+    """OpenCode: last matching rule wins."""
+    data = json.loads(OPENCODE_CONFIG.read_text(encoding="utf-8"))
+    decision = None
+    for pattern, action in data["permission"]["bash"].items():
+        if _glob_match(pattern, command):
+            decision = action
+    return decision
+
+
 def _codex_rules():
     """Parse Starlark prefix_rule() calls via Python's ast (syntax-compatible subset)."""
     tree = ast.parse(CODEX_RULES.read_text(encoding="utf-8"))
@@ -143,12 +197,42 @@ class ClaudeSettingsTest(unittest.TestCase):
         perms = _claude_permissions()
         allow = set(perms["allow"])
         deny = set(perms["deny"])
-        for rule in ("Read", "Grep", "Glob", "Bash(git status:*)", "Bash(git diff:*)"):
+        for rule in ("Read", "Grep", "Glob", "Bash(git status:*)", "Bash(git diff)"):
             self.assertIn(rule, allow)
-        self.assertTrue(any("unittest" in r for r in allow))
+        for cmd in ("git status", "git status --short", "git diff", "git diff --stat",
+                    "git diff --check", "python3 -m unittest discover -s tests"):
+            self.assertEqual(_claude_decision(cmd), "allow", cmd)
         # Broad deny rules would override every narrower allow rule (deny-first).
         for broad in ("Bash", "Bash(*)", "Read", "Edit", "Bash(git:*)", "Bash(python3:*)"):
             self.assertNotIn(broad, deny)
+
+    def test_allow_rules_are_narrow(self):
+        """Only git status and ls may carry a trailing wildcard; git diff/log/show accept
+        --output=<file> and git branch accepts -d/-m, so they must be exact-match only."""
+        for rule in _claude_permissions()["allow"]:
+            if rule.startswith("Bash(") and (rule.endswith(":*)") or rule.endswith(" *)")):
+                self.assertTrue(
+                    rule.startswith("Bash(git status") or rule.startswith("Bash(ls"), rule)
+
+    def test_write_capable_git_arguments_not_allowed(self):
+        for cmd in (
+            "git diff --output=/tmp/x",
+            "git diff HEAD --output=/tmp/x",
+            "git log --output=/tmp/x",
+            "git log --oneline -20 --output=/tmp/x",
+            "git show --output=/tmp/x",
+            "git branch -d feature",
+            "git branch -M main",
+            "git branch new-branch",
+            "git diff > out.txt",
+            "git status && git push",
+            "ls; git push",
+        ):
+            self.assertNotEqual(_claude_decision(cmd), "allow", cmd)
+        for cmd in ("git diff --output=/tmp/x", "git log --output=/tmp/x",
+                    "git show --output=/tmp/x", "git branch -d feature", "git branch -M main",
+                    "git push origin main"):
+            self.assertEqual(_claude_decision(cmd), "deny", cmd)
 
     def test_no_dangerous_modes_enabled(self):
         text = CLAUDE_SETTINGS.read_text(encoding="utf-8")
@@ -205,9 +289,33 @@ class OpenCodeConfigTest(unittest.TestCase):
             self.assertEqual(read[pattern], "deny", pattern)
 
     def test_read_only_git_allowed(self):
+        for cmd in ("git status", "git status --short", "git diff", "git diff --stat",
+                    "git diff --check", "git log --oneline -20",
+                    "python3 -m unittest discover -s tests"):
+            self.assertEqual(_opencode_bash_decision(cmd), "allow", cmd)
+
+    def test_bash_allow_patterns_are_exact(self):
         bash = self._permission()["bash"]
-        for pattern in ("git status*", "git diff*", "git log*", "git show*"):
-            self.assertEqual(bash[pattern], "allow", pattern)
+        for pattern, action in bash.items():
+            if action == "allow":
+                self.assertNotIn("*", pattern, pattern)
+                self.assertNotIn("?", pattern, pattern)
+
+    def test_write_capable_shell_forms_denied(self):
+        for cmd in (
+            "git diff --output=/tmp/x",
+            "git log --oneline -20 --output=/tmp/x",
+            "git show --output=/tmp/x",
+            "git branch -d feature",
+            "git branch -M main",
+            "git diff > out.txt",
+            "git status >> out.txt",
+            "git log --oneline -20 | tee out.txt",
+            "git push origin main",
+            "git status && git push",
+            "python3 -m unittest discover -s /etc",
+        ):
+            self.assertEqual(_opencode_bash_decision(cmd), "deny", cmd)
 
 
 class CodexConfigTest(unittest.TestCase):
@@ -250,6 +358,11 @@ class CodexConfigTest(unittest.TestCase):
             ["terraform", "destroy"],
             ["git", "reset", "--hard", "HEAD~1"],
             ["git", "clean", "-fd"],
+            ["git", "branch", "-d", "feature"],
+            ["git", "branch", "-M", "main"],
+            ["git", "branch", "--delete", "feature"],
+            ["git", "diff", "--output", "/tmp/x"],
+            ["git", "log", "--output", "/tmp/x"],
         ):
             self.assertEqual(_codex_decision(argv), "forbidden", argv)
 
@@ -257,13 +370,29 @@ class CodexConfigTest(unittest.TestCase):
         self.assertEqual(_codex_decision(["git", "commit", "-m", "x"]), "prompt")
         for argv in (
             ["git", "status"],
-            ["git", "diff", "--stat"],
-            ["git", "log", "-3"],
+            ["git", "status", "--short"],
             ["python3", "-m", "unittest", "discover", "-s", "tests"],
         ):
             self.assertEqual(_codex_decision(argv), "allow", argv)
         # Unlisted commands fall through to sandbox/approval policy, not to allow.
         self.assertIsNone(_codex_decision(["make", "test"]))
+
+    def test_no_broad_allow_for_write_capable_git(self):
+        """git diff/log/show accept --output=<file> (single token, not prefix-matchable),
+        so they must never be allowed by a prefix rule."""
+        for argv in (
+            ["git", "diff", "--output=/tmp/x"],
+            ["git", "log", "--output=/tmp/x"],
+            ["git", "show", "--output=/tmp/x"],
+            ["git", "diff", "--stat"],
+            ["git", "log", "-3"],
+            ["git", "branch", "new-branch"],
+            ["python3", "-m", "unittest", "discover", "-s", "/etc"],
+        ):
+            self.assertNotEqual(_codex_decision(argv), "allow", argv)
+        for name, kw in _codex_rules():
+            if kw["decision"] == "allow":
+                self.assertNotIn(kw["pattern"][0], ("bash", "sh", "zsh"), kw["pattern"])
 
 
 class CanonicalInstructionsTest(unittest.TestCase):
@@ -292,6 +421,13 @@ class CanonicalInstructionsTest(unittest.TestCase):
         self.assertIn(".ai/rules/security.md", text)
         self.assertIn(".ai/rules/review.md", text)
 
+    def test_agent_roles_match_plan(self):
+        text = AGENTS_MD.read_text(encoding="utf-8")
+        self.assertIn("- Codex: Owner / Implementer", text)
+        self.assertIn("- Claude Code: 設計・コード・security Reviewer", text)
+        self.assertIn("- OpenCode + local LLM: Auxiliary Reviewer", text)
+        self.assertNotIn("Claude Code: Main Implementer", text)
+
     def test_claude_md_is_thin_adapter(self):
         self.assertFalse(CLAUDE_MD.is_symlink())
         text = CLAUDE_MD.read_text(encoding="utf-8")
@@ -319,14 +455,27 @@ class ProjectSkeletonTest(unittest.TestCase):
         for entry in (".env", ".env.*", "*.tfstate", ".claude/settings.local.json", "__pycache__/"):
             self.assertIn(entry, text)
 
-    def test_adrs_exist_with_required_format(self):
-        expected = {
-            "0001-manual-reusable-ai-review.md",
-            "0002-review-trust-boundaries.md",
-            "0003-canonical-agent-instructions.md",
-            "0004-review-authentication.md",
-        }
-        self.assertEqual({p.name for p in ADR_DIR.glob("*.md")}, expected)
+    INITIAL_ADRS = (
+        "0001-manual-reusable-ai-review.md",
+        "0002-review-trust-boundaries.md",
+        "0003-canonical-agent-instructions.md",
+        "0004-review-authentication.md",
+    )
+
+    def test_initial_adrs_exist(self):
+        for name in self.INITIAL_ADRS:
+            self.assertTrue((ADR_DIR / name).is_file(), name)
+
+    def test_adr_numbering_is_sequential_and_unique(self):
+        names = sorted(p.name for p in ADR_DIR.glob("*.md"))
+        self.assertTrue(names)
+        numbers = []
+        for name in names:
+            self.assertRegex(name, r"^\d{4}-[a-z0-9-]+\.md$")
+            numbers.append(int(name[:4]))
+        self.assertEqual(numbers, list(range(1, len(numbers) + 1)), names)
+
+    def test_adrs_have_required_format(self):
         for path in ADR_DIR.glob("*.md"):
             text = path.read_text(encoding="utf-8")
             number = path.name[:4]
@@ -334,8 +483,10 @@ class ProjectSkeletonTest(unittest.TestCase):
             for header in ("## Status", "## Context", "## Decision", "## Rationale",
                            "## Alternatives Considered", "## Consequences", "## References"):
                 self.assertIn(header, text, path.name)
-            status = re.search(r"## Status\n\n(\S+)", text).group(1)
-            self.assertIn(status, {"Proposed", "Accepted", "Superseded", "Deprecated"}, path.name)
+            status = re.search(r"## Status\n\n(\S+)", text)
+            self.assertIsNotNone(status, path.name)
+            self.assertIn(status.group(1),
+                          {"Proposed", "Accepted", "Superseded", "Deprecated"}, path.name)
 
     def test_no_secret_like_values_in_phase0_files(self):
         for path in PHASE0_FILES + sorted(ADR_DIR.glob("*.md")):
