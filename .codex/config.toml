@@ -1,0 +1,6 @@
+# Project-scoped Codex config. Loaded only when this project is trusted.
+# Rule semantics live in AGENTS.md; this file only defines enforcement.
+# Keys verified against the official config reference (codex-cli 0.153.4).
+
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"

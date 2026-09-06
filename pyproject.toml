@@ -1,0 +1,11 @@
+[project]
+name = "ai-cross-pr-review"
+version = "0.0.0"
+description = "Reusable AI PR review infrastructure (GitHub Actions + Claude Code + Codex + OpenCode)"
+# 3.11+ is required for the standard-library tomllib used by tests.
+# Verified locally with Python 3.14.7; no runtime dependencies in the MVP.
+requires-python = ">=3.11"
+dependencies = []
+
+# Test entry point (standard library only):
+#   python3 -m unittest discover -s tests

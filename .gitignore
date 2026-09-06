@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets / local state (never commit)
+.env
+.env.*
+*.tfstate
+*.tfstate.*
+
+# Agent-local settings
+.claude/settings.local.json
+
+# OS
+.DS_Store

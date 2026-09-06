@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*terraform.tfstate*": "deny",
+      "~/.aws/*": "deny",
+      "~/.ssh/*": "deny"
+    },
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "edit": "deny",
+    "bash": {
+      "*": "deny",
+      "ls *": "allow",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git show*": "allow",
+      "python3 -m unittest*": "allow"
+    },
+    "task": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "external_directory": "deny"
+  }
+}
