@@ -1,0 +1,84 @@
+# Project-scoped Codex execpolicy rules (Starlark). Loaded only when trusted.
+# Rule semantics live in AGENTS.md. Most restrictive matching decision wins.
+# Verify: codex execpolicy check --pretty --rules .codex/rules/safety.rules -- <command>
+
+prefix_rule(
+    pattern = ["git", "push"],
+    decision = "forbidden",
+    justification = "AGENTS.md: git push is prohibited",
+)
+
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "forbidden",
+    justification = "AGENTS.md: destructive git operation",
+)
+
+prefix_rule(
+    pattern = ["git", "clean"],
+    decision = "forbidden",
+    justification = "AGENTS.md: destructive git operation",
+)
+
+prefix_rule(
+    pattern = ["git", "branch", ["-d", "-D", "-m", "-M", "--delete", "--move", "-f", "--force"]],
+    decision = "forbidden",
+    justification = "AGENTS.md: destructive git operation",
+)
+
+prefix_rule(
+    pattern = ["gh", "pr", ["merge", "close"]],
+    decision = "forbidden",
+    justification = "AGENTS.md: PR merge/close is prohibited",
+)
+
+prefix_rule(
+    pattern = ["gh", "repo", "delete"],
+    decision = "forbidden",
+    justification = "AGENTS.md: remote Git state must not be changed",
+)
+
+prefix_rule(
+    pattern = ["sudo"],
+    decision = "forbidden",
+    justification = "AGENTS.md: sudo is prohibited",
+)
+
+prefix_rule(
+    pattern = ["rm", ["-rf", "-fr", "-r", "-R"]],
+    decision = "forbidden",
+    justification = "AGENTS.md: rm -rf is prohibited",
+)
+
+prefix_rule(
+    pattern = ["terraform", ["apply", "destroy"]],
+    decision = "forbidden",
+    justification = "AGENTS.md: terraform apply/destroy is prohibited",
+)
+
+prefix_rule(
+    pattern = ["git", "commit"],
+    decision = "prompt",
+    justification = "AGENTS.md: commit only with explicit approval",
+)
+
+# Narrow allow: git status has no file-writing options. git diff/log/show accept
+# --output=<file>, which prefix rules cannot exclude, so they are left to the
+# sandbox/approval policy rather than allowed here.
+prefix_rule(
+    pattern = ["git", "status"],
+    decision = "allow",
+    justification = "Read-only git inspection",
+)
+
+prefix_rule(
+    pattern = ["git", ["diff", "log", "show"], "--output"],
+    decision = "forbidden",
+    justification = "Writes files outside the read-only review boundary",
+)
+
+prefix_rule(
+    pattern = ["python3", "-m", "unittest", "discover", "-s", "tests"],
+    decision = "allow",
+    justification = "Project test entry point",
+)

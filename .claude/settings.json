@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(ls:*)",
+      "Bash(git status:*)",
+      "Bash(git diff)",
+      "Bash(git diff --stat)",
+      "Bash(git diff --cached)",
+      "Bash(git diff --check)",
+      "Bash(git log --oneline -20)",
+      "Bash(python3 -m unittest discover -s tests)",
+      "Bash(python -m unittest discover -s tests)"
+    ],
+    "ask": [
+      "Bash(git commit:*)",
+      "Bash(git add:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git restore:*)",
+      "Bash(git stash:*)",
+      "Bash(git reset:*)",
+      "Bash(git branch:*)",
+      "Bash(gh:*)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(git branch -d:*)",
+      "Bash(git branch -D:*)",
+      "Bash(git branch -m:*)",
+      "Bash(git branch -M:*)",
+      "Bash(git branch --delete:*)",
+      "Bash(git branch --move:*)",
+      "Bash(git diff --output*)",
+      "Bash(git log --output*)",
+      "Bash(git show --output*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh pr close:*)",
+      "Bash(gh repo delete:*)",
+      "Bash(sudo:*)",
+      "Bash(rm -rf:*)",
+      "Bash(rm -fr:*)",
+      "Bash(terraform apply:*)",
+      "Bash(terraform destroy:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Read(.env*)",
+      "Read(**/terraform.tfstate*)",
+      "Read(~/.aws/**)",
+      "Read(~/.ssh/**)",
+      "Edit(.env*)"
+    ]
+  }
+}
