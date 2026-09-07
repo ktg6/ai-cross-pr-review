@@ -1,0 +1,89 @@
+name: AI Review Runtime
+description: >-
+  Reusable Workflow（claude-review.yml）内部専用のcomposite action。
+  calleeと同一commitのscripts/を実行する。consumer repositoryから直接使用しない。
+
+inputs:
+  step:
+    description: 実行するstep。Phase 1では prepare のみ対応する。
+    required: true
+  pr_number:
+    description: 対象PR番号（正の整数）。
+    required: false
+    default: ""
+  repository:
+    description: base repository（owner/name）。
+    required: false
+    default: ${{ github.repository }}
+  github_token:
+    description: read権限のGITHUB_TOKEN。prepare stepのsubprocess環境変数としてのみ渡す。
+    required: false
+    default: ""
+  output_dir:
+    description: bundle出力先。空または未存在のディレクトリであること。
+    required: false
+    default: ${{ runner.temp }}/ai-review-bundle
+  policy_path:
+    description: default branch上のrepository review policyのpath。
+    required: false
+    default: .github/ai-review.md
+
+outputs:
+  head_sha:
+    description: 固定したPR head SHA。
+    value: ${{ steps.prepare.outputs.head_sha }}
+  base_sha:
+    description: 固定したbase SHA。
+    value: ${{ steps.prepare.outputs.base_sha }}
+  merge_base_sha:
+    description: 固定したmerge-base SHA。
+    value: ${{ steps.prepare.outputs.merge_base_sha }}
+  policy_sha:
+    description: policy取得元のdefault branch commit SHA。
+    value: ${{ steps.prepare.outputs.policy_sha }}
+  diff_sha256:
+    description: diff.patchのSHA-256。
+    value: ${{ steps.prepare.outputs.diff_sha256 }}
+  snapshot_id:
+    description: snapshot全体を表すID（publisher markerに使用）。
+    value: ${{ steps.prepare.outputs.snapshot_id }}
+  bundle_dir:
+    description: 生成したbundleのディレクトリ。
+    value: ${{ steps.prepare.outputs.bundle_dir }}
+
+runs:
+  using: composite
+  steps:
+    # untrusted・半trustedな値は式で run: へ埋め込まず、環境変数経由で固定argvに渡す。
+    - name: Validate step
+      shell: bash
+      env:
+        AI_REVIEW_STEP: ${{ inputs.step }}
+      run: |
+        case "$AI_REVIEW_STEP" in
+          prepare) ;;
+          *) echo "::error::unsupported step: $AI_REVIEW_STEP" ; exit 2 ;;
+        esac
+
+    - name: Prepare review bundle
+      id: prepare
+      if: ${{ inputs.step == 'prepare' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        AI_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+        AI_REVIEW_REPOSITORY: ${{ inputs.repository }}
+        AI_REVIEW_OUTPUT_DIR: ${{ inputs.output_dir }}
+        AI_REVIEW_POLICY_PATH: ${{ inputs.policy_path }}
+        AI_REVIEW_API_URL: ${{ github.api_url }}
+        AI_REVIEW_SERVER_URL: ${{ github.server_url }}
+        AI_REVIEW_WORKDIR: ${{ runner.temp }}/ai-review-git
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../../scripts/prepare-review.py" \
+          --repository "$AI_REVIEW_REPOSITORY" \
+          --pr-number "$AI_REVIEW_PR_NUMBER" \
+          --output-dir "$AI_REVIEW_OUTPUT_DIR" \
+          --workdir "$AI_REVIEW_WORKDIR" \
+          --api-url "$AI_REVIEW_API_URL" \
+          --server-url "$AI_REVIEW_SERVER_URL" \
+          --policy-path "$AI_REVIEW_POLICY_PATH"
