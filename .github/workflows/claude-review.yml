@@ -1,0 +1,107 @@
+# 共通repository側のReusable Workflow。consumerはfull commit SHAで固定して呼び出す。
+# prepare（PR snapshot取得）とreview（Claudeによるread-onlyレビュー）を分離し、
+# GitHub権限とClaude Secretが同一jobに共存しないようにする。
+# publish jobはPhase 3で追加する。
+name: AI Review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: レビュー対象のPR番号。呼び出し元が決定し、AIには決めさせない。
+        required: true
+        type: string
+      model:
+        description: レビューに使用するmodel。
+        required: false
+        type: string
+        default: claude-opus-5
+      effort:
+        description: レビューのeffort level（low / medium / high / xhigh / max）。
+        required: false
+        type: string
+        default: high
+      policy_path:
+        description: consumerのdefault branch上にあるreview rulesのpath。
+        required: false
+        type: string
+        default: .github/ai-review.md
+    secrets:
+      claude_code_oauth_token:
+        description: Claude Code OAuth token。review jobのClaude実行stepだけで使う。
+        required: true
+
+# 既定は無権限。必要なjobだけが必要な権限を明示する。
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Prepare review bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      head_sha: ${{ steps.prepare.outputs.head_sha }}
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      merge_base_sha: ${{ steps.prepare.outputs.merge_base_sha }}
+      policy_sha: ${{ steps.prepare.outputs.policy_sha }}
+      diff_sha256: ${{ steps.prepare.outputs.diff_sha256 }}
+      snapshot_id: ${{ steps.prepare.outputs.snapshot_id }}
+    steps:
+      # PRコードはcheckoutしない。$/ はcalleeと同一commitの内部actionを参照する。
+      - name: Build bundle
+        id: prepare
+        uses: $/actions/review-runtime
+        with:
+          step: prepare
+          pr_number: ${{ inputs.pr_number }}
+          repository: ${{ github.repository }}
+          github_token: ${{ github.token }}
+          policy_path: ${{ inputs.policy_path }}
+          output_dir: ${{ runner.temp }}/ai-review-bundle
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ai-review-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-bundle
+          if-no-files-found: error
+          retention-days: 1
+
+  review:
+    name: Claude read-only review
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # GitHub権限を一切持たない。同一run内のartifactはActions runtime tokenで扱う。
+    permissions: {}
+    steps:
+      - name: Download bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-review-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-bundle
+
+      - name: Review
+        uses: $/actions/review-runtime
+        with:
+          step: review
+          bundle_dir: ${{ runner.temp }}/ai-review-bundle
+          output_dir: ${{ runner.temp }}/ai-review-result
+          model: ${{ inputs.model }}
+          effort: ${{ inputs.effort }}
+          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
+
+      - name: Upload normalized result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ai-review-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-result/review-result.json
+          if-no-files-found: error
+          retention-days: 1
