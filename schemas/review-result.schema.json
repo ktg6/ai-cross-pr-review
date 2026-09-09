@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ktg6/ai-cross-pr-review/schemas/review-result.schema.json",
+  "title": "AI review result (model output)",
+  "description": "Claudeが返す構造化レビュー結果の最小schema。repository、PR番号、SHA、投稿先はモデルに決定させないため、本schemaには含めない。これらはtrusted wrapperが付与する。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "summary", "findings", "limitations"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["1"]
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "detail", "severity", "confidence", "category", "path"],
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "category": {
+            "type": "string",
+            "enum": ["correctness", "security", "reliability", "maintainability", "testing", "other"]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          }
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    }
+  }
+}

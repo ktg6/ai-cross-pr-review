@@ -5,28 +5,44 @@ description: >-
 
 inputs:
   step:
-    description: 実行するstep。Phase 1では prepare のみ対応する。
+    description: 実行するstep。Phase 2では prepare と review に対応する。
     required: true
   pr_number:
-    description: 対象PR番号（正の整数）。
+    description: 対象PR番号（正の整数）。prepare stepでのみ使用する。
     required: false
     default: ""
   repository:
-    description: base repository（owner/name）。
+    description: base repository（owner/name）。prepare stepでのみ使用する。
     required: false
     default: ${{ github.repository }}
   github_token:
-    description: read権限のGITHUB_TOKEN。prepare stepのsubprocess環境変数としてのみ渡す。
+    description: read権限のGITHUB_TOKEN。prepare stepのsubprocess環境変数としてのみ渡す。review stepへは渡さない。
     required: false
     default: ""
   output_dir:
-    description: bundle出力先。空または未存在のディレクトリであること。
+    description: prepareはbundle、reviewは正規化済み結果の出力先。空または未存在のディレクトリであること。
     required: false
     default: ${{ runner.temp }}/ai-review-bundle
   policy_path:
-    description: default branch上のrepository review policyのpath。
+    description: default branch上のrepository review policyのpath。prepare stepでのみ使用する。
     required: false
     default: .github/ai-review.md
+  bundle_dir:
+    description: review stepが読み込むbundleのディレクトリ。
+    required: false
+    default: ""
+  claude_code_oauth_token:
+    description: Claude Code OAuth token。review stepのClaude実行stepにだけ渡す。
+    required: false
+    default: ""
+  model:
+    description: レビューに使用するmodel。AIではなくoperatorが決める。
+    required: false
+    default: claude-opus-5
+  effort:
+    description: レビューのeffort level（low / medium / high / xhigh / max）。
+    required: false
+    default: high
 
 outputs:
   head_sha:
@@ -61,7 +77,7 @@ runs:
         AI_REVIEW_STEP: ${{ inputs.step }}
       run: |
         case "$AI_REVIEW_STEP" in
-          prepare) ;;
+          prepare|review) ;;
           *) echo "::error::unsupported step: $AI_REVIEW_STEP" ; exit 2 ;;
         esac
 
@@ -87,3 +103,53 @@ runs:
           --api-url "$AI_REVIEW_API_URL" \
           --server-url "$AI_REVIEW_SERVER_URL" \
           --policy-path "$AI_REVIEW_POLICY_PATH"
+
+    # 固定versionのClaude Code CLIを導入する。installer自体もSHA-256を固定し、
+    # 不一致なら実行しない。導入後のbinaryはrun-review.pyでもrelease digestを検証する。
+    - name: Install pinned Claude Code CLI
+      if: ${{ inputs.step == 'review' }}
+      shell: bash
+      env:
+        AI_REVIEW_CLAUDE_VERSION: "2.1.263"
+        AI_REVIEW_INSTALLER: ${{ runner.temp }}/install-claude.sh
+        AI_REVIEW_INSTALLER_SHA256: "3a68d3406cf674e17bed1733a4dcf37805e2e47d87417700007d7e1aa766a944"
+        DISABLE_AUTOUPDATER: "1"
+      run: |
+        set -euo pipefail
+        curl -fsSL --proto '=https' --tlsv1.2 https://claude.ai/install.sh -o "$AI_REVIEW_INSTALLER"
+        printf '%s  %s\n' "$AI_REVIEW_INSTALLER_SHA256" "$AI_REVIEW_INSTALLER" | sha256sum --check --status -
+        bash "$AI_REVIEW_INSTALLER" "$AI_REVIEW_CLAUDE_VERSION"
+        rm -f "$AI_REVIEW_INSTALLER"
+
+    - name: Run read-only review
+      id: review
+      if: ${{ inputs.step == 'review' }}
+      shell: bash
+      env:
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        AI_REVIEW_BUNDLE_DIR: ${{ inputs.bundle_dir }}
+        AI_REVIEW_OUTPUT_DIR: ${{ inputs.output_dir }}
+        AI_REVIEW_WORKDIR: ${{ runner.temp }}/ai-review-claude
+        AI_REVIEW_MODEL: ${{ inputs.model }}
+        AI_REVIEW_EFFORT: ${{ inputs.effort }}
+        DISABLE_AUTOUPDATER: "1"
+      run: |
+        set -euo pipefail
+        CLAUDE_BIN="$HOME/.local/bin/claude"
+        mkdir -p "$AI_REVIEW_WORKDIR"
+        python3 "$GITHUB_ACTION_PATH/../../scripts/run-review.py" \
+          --bundle-dir "$AI_REVIEW_BUNDLE_DIR" \
+          --workdir "$AI_REVIEW_WORKDIR" \
+          --prompt-file "$GITHUB_ACTION_PATH/../../prompts/review.md" \
+          --schema-file "$GITHUB_ACTION_PATH/../../schemas/review-result.schema.json" \
+          --claude-bin "$CLAUDE_BIN" \
+          --model "$AI_REVIEW_MODEL" \
+          --effort "$AI_REVIEW_EFFORT"
+        python3 "$GITHUB_ACTION_PATH/../../scripts/normalize-review.py" \
+          --bundle-dir "$AI_REVIEW_BUNDLE_DIR" \
+          --raw-file "$AI_REVIEW_WORKDIR/claude-raw.json" \
+          --invocation-file "$AI_REVIEW_WORKDIR/claude-invocation.json" \
+          --output-dir "$AI_REVIEW_OUTPUT_DIR"
+
+    # raw envelopeとpromptはjob間へ渡さない。artifact化されるのは正規化済み結果だけ。
+    # runnerはephemeralであり、明示的なrecursive deleteは行わない。
