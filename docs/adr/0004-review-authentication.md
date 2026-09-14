@@ -15,6 +15,9 @@ review jobでClaude Codeを実行するには認証が必要である。選択�
 - token値、認証応答、環境変数一覧をログへ出さない。Secretはreview jobのClaude実行stepだけへ渡す。
 - Secret所有者、更新担当、期限通知を決め、90日程度のrotation通知を運用案とする。旧tokenが自動失効するとは仮定しない。
 - 認証方式はClaude実行stepへ閉じ込め、publisherやschemaから分離する。
+- Phase 2の実装では、Secretはreusable workflowの`secrets.claude_code_oauth_token`からreview jobのClaude実行stepへだけ渡す。`prepare`と将来の`publish`へは渡さない。review jobは`permissions: {}`とし、GitHub tokenと同一jobに置かない。
+- CLI adapterはClaude Code CLIへ最小の環境変数だけを構築して渡す。`CLAUDE_CODE_OAUTH_TOKEN`以外の認証情報、GitHub token、Actions関連変数は継承させない。tokenはargv、設定file、bundle、artifactへ書かない。
+- モデル出力とstderrはログ・artifactへ出す前にcredentialらしき値を除去し、渡したtoken値そのものも除去対象に含める。
 - 複数repository・組織運用ではAPI keyまたはWIFを再評価する。WIF導入時だけ`id-token: write`を追加し、audience・subject・repository・ref条件を限定する。
 
 ## Rationale
@@ -30,7 +33,7 @@ OAuth tokenは追加のConsole設定なしにpilotを開始でき、認証をste
 ## Consequences
 
 - Phase 2でreview job実装時に本ADRに従いSecretをstep限定で渡す。
-- OAuth tokenの明示的な失効手順は公式docsの参照範囲では確認できていない。Phase 2までに再確認し、確認できない場合はrotationを「新token発行 + 旧Secret削除」として運用する。
+- OAuth tokenの明示的な失効手順は、Phase 2で再確認しても公式docsの参照範囲では確認できなかった。`claude setup-token`はtokenを保存せず端末へ出力するだけであり、`/logout`が撤回するのは端末に保存されたlogin credentialである。したがってrotationは「新token発行 + 旧Secret削除」として運用し、旧tokenが自動失効するとは仮定しない。有効期間は公式docsどおり1年として扱う。
 - `--bare`モードは`CLAUDE_CODE_OAUTH_TOKEN`を読まないため、Phase 2のCLI adapter案では`--bare`を使わない。
 
 ## References
