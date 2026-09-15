@@ -13,6 +13,7 @@ Proposed
 - 通常CIとAI Reviewを分離する。
 - Consumer側は`workflow_dispatch(pr_number)`のthin wrapper（`.github/workflows/ai-review.yml`）だけを持つ。
 - 共通repository側は`workflow_call`のReusable Workflow（`.github/workflows/claude-review.yml`）を提供し、consumerはfull commit SHAで固定して呼び出す。
+- Reusable Workflowは`prepare`、`review`、`publish`の3 jobで構成する。`publish`は`needs: [prepare, review]`とし、`pull-requests: write`を持つ唯一のjobとする。レビュー結果は同一run内のartifactだけで受け渡し、投稿先PRはworkflow inputの`pr_number`、snapshotの同一性はprepareのjob outputで決まる（Phase 3）。
 - `secrets: inherit`を使わず、必要なSecretだけを明示的に渡す。
 - Claude Codeを一次レビューとし、CodexはActionsへ組み込まず、GitHub上の`@codex review`による独立した二次レビューとする。
 - 対象はGitHub.comとし、GHES対応は将来の別decisionとする。
@@ -31,10 +32,12 @@ Proposed
 ## Consequences
 
 - レビューは自動では走らず、人が`pr_number`を指定して起動する。
+- 投稿は手動起動1回につき最大1コメントであり、再実行しない限り更新されない。自動再レビュー・自動再投稿は行わない。
 - consumerは共通workflowのSHA更新を明示的に行う必要がある。
 - GHESや自動trigger対応は後続ADRで扱う。
 
 ## References
 
-- `docs/plan/implementation-plan.md` 3章、4章、12章、14章
+- `docs/plan/implementation-plan.md` 3章、4章、11章、12章、14章
+- `.github/workflows/claude-review.yml`、`actions/review-runtime/action.yml`
 - ADR-0002（trust boundaries）

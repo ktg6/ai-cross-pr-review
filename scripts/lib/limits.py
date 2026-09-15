@@ -38,6 +38,61 @@ REVIEW_PROVIDER = "anthropic-claude-code-cli"
 
 KIB = 1024
 
+# Vocabulary of the review-result schema (schemas/review-result.schema.json).
+# Both the normalizer and the publisher validate against these tuples so the two
+# steps cannot drift apart.
+SEVERITIES: tuple[str, ...] = ("high", "medium", "low")
+CONFIDENCES: tuple[str, ...] = ("high", "medium", "low")
+CATEGORIES: tuple[str, ...] = (
+    "correctness",
+    "security",
+    "reliability",
+    "maintainability",
+    "testing",
+    "other",
+)
+REQUIRED_FINDING_KEYS: tuple[str, ...] = ("title", "detail", "severity", "confidence", "category", "path")
+OPTIONAL_FINDING_KEYS: tuple[str, ...] = ("line",)
+RESULT_KEYS: tuple[str, ...] = ("schema_version", "summary", "findings", "limitations")
+NORMALIZED_RESULT_KEYS: tuple[str, ...] = (
+    "result_schema_version",
+    "framework_version",
+    "snapshot",
+    "run",
+    "normalization",
+    "review",
+)
+SNAPSHOT_KEYS: tuple[str, ...] = (
+    "repository",
+    "pr_number",
+    "base_sha",
+    "head_sha",
+    "merge_base_sha",
+    "diff_sha256",
+    "policy_commit_sha",
+    "policy_blob_sha",
+    "snapshot_id",
+    "reviewable_path_hashes",
+)
+RUN_KEYS: tuple[str, ...] = (
+    "provider",
+    "cli_version",
+    "model_requested",
+    "model_reported",
+    "effort",
+    "tools_enabled",
+    "run_id",
+    "num_turns",
+    "duration_ms",
+)
+NORMALIZATION_KEYS: tuple[str, ...] = (
+    "dropped_findings",
+    "redactions",
+    "excluded_files",
+)
+DROPPED_FINDING_KEYS: tuple[str, ...] = ("index", "reason")
+MAX_FINDING_LINE = 1000000
+
 
 @dataclass(frozen=True)
 class Limits:
@@ -72,6 +127,13 @@ class Limits:
     max_finding_path_chars: int = 512
     max_limitations: int = 10
     max_limitation_chars: int = 500
+    # Phase 3: deterministic publisher.
+    # GitHub rejects issue comments over 65536 characters; stay below it so the
+    # rendered comment can never be truncated by the API.
+    max_comment_chars: int = 60000
+    max_comment_pages: int = 10
+    publish_retry_attempts: int = 3
+    publish_retry_delay_seconds: float = 2.0
 
     def as_dict(self) -> dict:
         return asdict(self)

@@ -12,6 +12,8 @@ Phase 1では`prepare`の実体（`scripts/prepare-review.py`、`scripts/lib/`�
 
 Phase 2では`review`を実装するにあたり、公式`claude-code-action`が本ADRの採用gateを満たすかを固定版（v1、base-actionがClaude Code CLI 2.1.263を導入）で検証した。検証結果と、それに基づくreview jobの実行方式もDecisionへ追記する。
 
+Phase 3では`publish`を実装した。publisherはAI結果を解釈せずに投稿する唯一のwrite権限保持者であり、stale判定、artifact真正性の扱い、marker、出力無害化、retryは境界そのものであるため、Decisionへ追記する。
+
 ## Decision
 
 - `prepare`、`review`、`publish`を別jobにし、既定を`permissions: {}`とする。`pull-requests: write`はpublisherだけに付与し、Claude Secretはreview jobのClaude実行stepだけに渡す。
@@ -45,6 +47,19 @@ Phase 2では`review`を実装するにあたり、公式`claude-code-action`が
   - 正規化（`scripts/normalize-review.py`）は決定論的に行う。envelopeの`is_error`・`subtype`・`permission_denials`を検査し、structured outputに対して未知field、必須field、enum、長さ、件数、changed files外のpath、除外済みpath、不正な行番号を検証する。findingsの問題は個別に破棄して`normalization.dropped_findings`へ記録し、result全体の破損・上限超過・tool要求は停止させる。
   - repository、PR番号、base/head/merge-base SHA、diff hash、policy SHA、provider、model、run IDはtrusted wrapperがbundleのmanifestと自前のinvocation記録から付与する。モデル出力のschemaにはこれらのfieldを置かない。
   - 出力にはcredentialらしき値の除去を適用し、review stepへ渡したtoken値そのものも除去対象に含める。stderrはredactionと制御文字除去のうえ末尾のみをログへ出す。
+- publish jobの実行方式（Phase 3、`scripts/publish-review.py`、`scripts/lib/render.py`）:
+  - publish jobは`needs: [prepare, review]`の独立jobとし、権限は`pull-requests: write`だけとする。Claude Secretを受け取らず、PRコードもbundleもcheckoutしない。
+  - 投稿先はworkflow contextとinputだけで決まる。repository、PR番号、API endpointをresult artifactから読まず、artifact由来の`snapshot.repository`・`snapshot.pr_number`が一致しない場合は停止する。
+  - artifactの真正性は、prepare jobのjob outputとして受け取った`snapshot_id`との一致で判定する。artifactの外側を通る値と一致しない結果は投稿しない。
+  - publisherはnormalizerを信頼せず、findingsのschema・enum・長さ・件数・行番号・path（禁止path・不正segment・制御文字）を再検証する。1件でも不正なら投稿しない。normalizerがfinding単位で破棄するのに対し、publisherは全体を停止させる。
+  - credentialらしき値の除去はpublisherでも再度行う。除去件数はコメントのNotesへ件数だけ記載し、値は出力しない。
+  - 投稿直前にPR metadataを再取得し、open状態・head SHA・base SHAがresultのsnapshotと一致することを確認する。closed、merged、head/base移動、PR消失はいずれも投稿せずに停止する。GitHubへの書き込みは、この確認より後にしか行わない。
+  - コメントは固定Markdown templateとして生成する。モデル由来のテキストはすべてescapeし、HTML、link、image、`@mention`、`#123`のcross-referenceを無効化する。値の埋め込みはcode spanに限り、SHA・model名・run IDは形式検証を通過した値だけを表示する。
+  - 先頭行を`<!-- ai-cross-pr-review:v1 snapshot=<snapshot_id> -->`のmarkerとする。同一snapshotのmarkerを持つ既存コメントは更新し、異なるsnapshotは新規コメントとする。markerが先頭行にあり、かつ作成者がbotであるコメントだけを更新対象とする。PR参加者が本文へmarkerを複製しても更新先を奪えない。
+  - コメント一覧が上限page数を超える場合は投稿せずに停止する。全件を確認できないまま新規投稿して重複させない。
+  - retryはGETとPATCHにだけ適用する。POSTは429（要求が拒否され、状態変化がない）のときだけ再送し、5xxとtransport失敗では再送しない。DBを持たず、exactly-onceは保証しない。
+  - コメント長は上限を持ち、超過時はseverityの低いfindingから省略して省略件数を明記する。APIにコメントを切り詰めさせない。
+  - 投稿結果（`comment_action`、`comment_id`、`head_sha`、`snapshot_id`）だけをjob outputへ書き出す。merge、approve、review投稿、label操作、branch操作は行わない。
 
 ## Rationale
 
@@ -58,10 +73,17 @@ Promptだけでは防御にならない。filesystem境界、tool制限、GitHub
 - 履歴全体をfetchしてgitでmerge-baseを計算する: fetch量が無制限になるため採用せず、SHA同士のcompare APIで求める。
 - git credentialを`-c http.extraheader`や設定fileで渡す: argvや設定fileへtokenが残るため採用しない。
 - AI出力をそのまま投稿する: HTML・mention・secretらしき値・不正pathの混入を防げないため採用しない。
+- 不正なfindingをpublisherでも個別に破棄する: normalizer通過後の結果が壊れている場合は経路自体の異常であるため、破棄ではなく停止する。
+- publisherがartifactの署名を検証する: 同一run内のartifactに追加の鍵管理を導入する必要があるため採用せず、prepareのjob outputとの突合で代替する。
+- 既存コメントの特定にcomment IDをartifactやjob outputで引き回す: runをまたいで更新できず、AI結果に投稿先IDを持ち込む形にもなるため採用しない。marker方式とする。
+- POSTの5xxを再送する: コメントが二重投稿される可能性があるため採用しない。
 
 ## Consequences
 
-- diff取得、schema、publisherの実装はPhase 1〜3で本ADRに従う。Phase 1の`prepare`は本ADRのSHA固定・diff取得方式に従って実装済みである。Phase 2の`review`は本ADRのCLI adapter方式に従って実装済みである。
+- diff取得、schema、publisherの実装はPhase 1〜3で本ADRに従う。Phase 1の`prepare`、Phase 2の`review`、Phase 3の`publish`はいずれも本ADRに従って実装済みである。
+- publisherがGitHub tokenを持つため、tokenはcomment-only権限ではない。実装の監査（merge・approve・push経路を持たないこと）をテストで固定する。
+- 同一runの再実行はコメントを更新するが、runをまたぐ重複投稿は理論上起こりうる。DBを持たない以上、exactly-onceは保証しない。
+- コメントが上限を超えるPRでは一部のfindingが表示されない。完全性よりコメントの生成可能性と可読性を優先する。
 - 公式Actionのgate再評価は、Actionがreview jobでGitHub tokenとcheckoutを必須としなくなった時点で行う。それまではCLI adapterを維持し、gateを緩める変更は行わない。
 - CLI adapterはClaude Code CLIのflag仕様に依存する。version固定とdigest照合により、仕様変更が無警告で持ち込まれることは防げるが、version更新時は本ADRのflag一覧を再検証する必要がある。
 - toolを一切持たせないため、モデルはbundleに含まれない周辺コードを参照できない。文脈不足による見落としは`limitations`として報告させ、レビューの完全性より境界の単純さを優先する。
@@ -76,6 +98,7 @@ Promptだけでは防御にならない。filesystem境界、tool制限、GitHub
 - `docs/plan/implementation-plan.md` 5章、6章、7章、9章、11章、12章
 - `scripts/prepare-review.py`、`scripts/lib/diff.py`、`scripts/lib/github.py`、`scripts/lib/limits.py`、`tests/test_prepare_review.py`
 - `scripts/run-review.py`、`scripts/normalize-review.py`、`scripts/lib/bundle.py`、`prompts/review.md`、`schemas/review-result.schema.json`、`.github/workflows/claude-review.yml`、`tests/test_review_result.py`
+- `scripts/publish-review.py`、`scripts/lib/render.py`、`scripts/lib/github.py`、`actions/review-runtime/action.yml`、`tests/test_publish_review.py`
 - Claude Code CLI reference（code.claude.com/docs/en/cli-reference）、headless（同/headless）
 - `anthropics/claude-code-action`の`action.yml`、`base-action/action.yml`、`docs/security.md`、`src/github/token.ts`、`src/modes/agent/index.ts`
 - ADR-0001、ADR-0004

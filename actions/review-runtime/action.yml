@@ -5,18 +5,20 @@ description: >-
 
 inputs:
   step:
-    description: 実行するstep。Phase 2では prepare と review に対応する。
+    description: 実行するstep。prepare、review、publishに対応する。
     required: true
   pr_number:
-    description: 対象PR番号（正の整数）。prepare stepでのみ使用する。
+    description: 対象PR番号（正の整数）。prepareとpublish stepで使用する。
     required: false
     default: ""
   repository:
-    description: base repository（owner/name）。prepare stepでのみ使用する。
+    description: base repository（owner/name）。prepareとpublish stepで使用する。
     required: false
     default: ${{ github.repository }}
   github_token:
-    description: read権限のGITHUB_TOKEN。prepare stepのsubprocess環境変数としてのみ渡す。review stepへは渡さない。
+    description: >-
+      GITHUB_TOKEN。prepare（read）とpublish（pull-requests: write）のsubprocess環境変数としてのみ渡す。
+      review stepへは渡さない。
     required: false
     default: ""
   output_dir:
@@ -29,6 +31,15 @@ inputs:
     default: .github/ai-review.md
   bundle_dir:
     description: review stepが読み込むbundleのディレクトリ。
+    required: false
+    default: ""
+  result_file:
+    description: publish stepが読み込む正規化済み結果（review-result.json）のpath。
+    required: false
+    default: ""
+  expected_snapshot_id:
+    description: >-
+      prepare jobが出力したsnapshot_id。publish stepはartifactの値と一致しない結果を投稿しない。
     required: false
     default: ""
   claude_code_oauth_token:
@@ -47,7 +58,7 @@ inputs:
 outputs:
   head_sha:
     description: 固定したPR head SHA。
-    value: ${{ steps.prepare.outputs.head_sha }}
+    value: ${{ steps.prepare.outputs.head_sha || steps.publish.outputs.head_sha }}
   base_sha:
     description: 固定したbase SHA。
     value: ${{ steps.prepare.outputs.base_sha }}
@@ -62,10 +73,16 @@ outputs:
     value: ${{ steps.prepare.outputs.diff_sha256 }}
   snapshot_id:
     description: snapshot全体を表すID（publisher markerに使用）。
-    value: ${{ steps.prepare.outputs.snapshot_id }}
+    value: ${{ steps.prepare.outputs.snapshot_id || steps.publish.outputs.snapshot_id }}
   bundle_dir:
     description: 生成したbundleのディレクトリ。
     value: ${{ steps.prepare.outputs.bundle_dir }}
+  comment_id:
+    description: publish stepが作成・更新したPRコメントのID。
+    value: ${{ steps.publish.outputs.comment_id }}
+  comment_action:
+    description: publish stepの結果（created / updated）。
+    value: ${{ steps.publish.outputs.comment_action }}
 
 runs:
   using: composite
@@ -77,7 +94,7 @@ runs:
         AI_REVIEW_STEP: ${{ inputs.step }}
       run: |
         case "$AI_REVIEW_STEP" in
-          prepare|review) ;;
+          prepare|review|publish) ;;
           *) echo "::error::unsupported step: $AI_REVIEW_STEP" ; exit 2 ;;
         esac
 
@@ -153,3 +170,24 @@ runs:
 
     # raw envelopeとpromptはjob間へ渡さない。artifact化されるのは正規化済み結果だけ。
     # runnerはephemeralであり、明示的なrecursive deleteは行わない。
+
+    # publish stepはClaude Secretを受け取らない。投稿先はworkflow contextとprepareの
+    # 出力だけで決まり、AI結果からは決まらない。
+    - name: Publish review comment
+      id: publish
+      if: ${{ inputs.step == 'publish' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        AI_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+        AI_REVIEW_REPOSITORY: ${{ inputs.repository }}
+        AI_REVIEW_RESULT_FILE: ${{ inputs.result_file }}
+        AI_REVIEW_SNAPSHOT_ID: ${{ inputs.expected_snapshot_id }}
+        AI_REVIEW_API_URL: ${{ github.api_url }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../../scripts/publish-review.py" \
+          --repository "$AI_REVIEW_REPOSITORY" \
+          --pr-number "$AI_REVIEW_PR_NUMBER" \
+          --result-file "$AI_REVIEW_RESULT_FILE" \
+          --expected-snapshot-id "$AI_REVIEW_SNAPSHOT_ID" \
+          --api-url "$AI_REVIEW_API_URL"
