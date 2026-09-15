@@ -533,6 +533,10 @@ class NormalizeTests(TempDirCase):
         self.assertEqual(snapshot["snapshot_id"], SNAPSHOT_ID)
         self.assertEqual(snapshot["diff_sha256"], hashlib.sha256(DEFAULT_DIFF).hexdigest())
         self.assertEqual(snapshot["policy_commit_sha"], BASE_SHA)
+        self.assertEqual(
+            snapshot["reviewable_path_hashes"],
+            [hashlib.sha256(b"src/app.py").hexdigest()],
+        )
         self.assertEqual(document["run"]["provider"], limits_mod.REVIEW_PROVIDER)
         self.assertEqual(document["run"]["cli_version"], limits_mod.CLAUDE_CODE_VERSION)
         self.assertFalse(document["run"]["tools_enabled"])
@@ -700,20 +704,31 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.workflow = WORKFLOW_FILE.read_text("utf-8")
         self.action = ACTION_FILE.read_text("utf-8")
 
+    def _job_sections(self):
+        """Split the workflow into its prepare / review / publish job bodies."""
+        prepare, rest = self.workflow.split("jobs:", 1)[1].split("\n  review:", 1)
+        review, publish = rest.split("\n  publish:", 1)
+        return prepare, review, publish
+
     def test_jobs_are_separated_with_least_privilege(self):
         self.assertIn("permissions: {}", self.workflow)
         self.assertNotIn("secrets: inherit", self.workflow)
         self.assertNotIn("contents: write", self.workflow)
-        self.assertNotIn("pull-requests: write", self.workflow)
         self.assertNotIn("id-token: write", self.workflow)
         self.assertNotIn("issues: write", self.workflow)
-        prepare, review = self.workflow.split("  review:", 1)
+        prepare, review, publish = self._job_sections()
         self.assertIn("contents: read", prepare)
         self.assertIn("pull-requests: read", prepare)
-        self.assertNotIn("claude_code_oauth_token", prepare.split("jobs:", 1)[1])
+        self.assertNotIn("pull-requests: write", prepare)
+        self.assertNotIn("claude_code_oauth_token", prepare)
         self.assertIn("claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}", review)
         self.assertNotIn("github_token", review)
         self.assertIn("permissions: {}", review)
+        self.assertNotIn("pull-requests: write", review)
+        # publish is the only job with write access, and it never sees the secret.
+        self.assertIn("pull-requests: write", publish)
+        self.assertNotIn("claude_code_oauth_token", publish)
+        self.assertIn("github_token: ${{ github.token }}", publish)
 
     def test_third_party_actions_are_pinned_to_full_sha(self):
         uses = re.findall(r"uses: (\S+)", self.workflow)
@@ -738,7 +753,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("rm -rf", self.action)
 
     def test_review_step_receives_no_github_token(self):
-        review_step = self.action.split("Run read-only review", 1)[1]
+        review_step = self.action.split("Run read-only review", 1)[1].split("Publish review comment", 1)[0]
         self.assertNotIn("GITHUB_TOKEN", review_step)
         self.assertIn("CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}", review_step)
         prepare_step = self.action.split("Prepare review bundle", 1)[1].split("Install pinned", 1)[0]

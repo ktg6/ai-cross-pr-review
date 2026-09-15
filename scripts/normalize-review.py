@@ -33,14 +33,16 @@ EXIT_STOP = 2
 RESULT_NAME = "review-result.json"
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
-SEVERITIES = ("high", "medium", "low")
-CONFIDENCES = ("high", "medium", "low")
-CATEGORIES = ("correctness", "security", "reliability", "maintainability", "testing", "other")
+# The result vocabulary lives in lib/limits.py so that the publisher validates
+# the same values without importing this script.
+SEVERITIES = limits_mod.SEVERITIES
+CONFIDENCES = limits_mod.CONFIDENCES
+CATEGORIES = limits_mod.CATEGORIES
 SEVERITY_ORDER = {name: index for index, name in enumerate(SEVERITIES)}
 
-REQUIRED_FINDING_KEYS = ("title", "detail", "severity", "confidence", "category", "path")
-OPTIONAL_FINDING_KEYS = ("line",)
-RESULT_KEYS = ("schema_version", "summary", "findings", "limitations")
+REQUIRED_FINDING_KEYS = limits_mod.REQUIRED_FINDING_KEYS
+OPTIONAL_FINDING_KEYS = limits_mod.OPTIONAL_FINDING_KEYS
+RESULT_KEYS = limits_mod.RESULT_KEYS
 
 
 class NormalizeError(Exception):
@@ -192,7 +194,7 @@ def _validate_finding(
     }
     if "line" in item and item["line"] is not None:
         line = item["line"]
-        if not isinstance(line, int) or isinstance(line, bool) or not 1 <= line <= 1000000:
+        if not isinstance(line, int) or isinstance(line, bool) or not 1 <= line <= limits_mod.MAX_FINDING_LINE:
             raise NormalizeError("finding line is not a positive integer within range")
         finding["line"] = line
     return finding
@@ -261,6 +263,15 @@ def normalize(
             "policy_commit_sha": policy.get("commit_sha"),
             "policy_blob_sha": policy.get("blob_sha"),
             "snapshot_id": b.snapshot_id,
+            # Keep paths out of the result while giving the publisher enough
+            # information to reject a finding outside the reviewed diff.
+            "reviewable_path_hashes": sorted(
+                {
+                    bundle_mod.sha256_hex(entry.path.encode("utf-8"))
+                    for entry in b.files
+                    if entry.reviewable
+                }
+            ),
         },
         "run": {
             "provider": invocation.get("provider"),

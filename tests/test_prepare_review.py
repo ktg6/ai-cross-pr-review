@@ -194,7 +194,7 @@ class FakeGitHub:
     def set_pull_sequence(self, *payloads: dict) -> None:
         self.pull_payloads = list(payloads)
 
-    def __call__(self, method: str, url: str, headers: dict):
+    def __call__(self, method: str, url: str, headers: dict, body: bytes | None = None):
         self.requests.append((method, url, headers))
         parsed = urllib.parse.urlsplit(url)
         path = parsed.path
@@ -372,23 +372,23 @@ class GitHubClientTests(unittest.TestCase):
         return gh.GitHubClient("https://api.github.com", CANARY_TOKEN, transport=transport, **kw)
 
     def test_nonexistent_pull_returns_none(self):
-        client = self._client(lambda m, u, h: (404, {}, b"{}"))
+        client = self._client(lambda m, u, h, b=None: (404, {}, b"{}"))
         self.assertIsNone(client.get_pull(OWNER, NAME, 1))
 
     def test_server_error_raises(self):
-        client = self._client(lambda m, u, h: (500, {}, b"oops"))
+        client = self._client(lambda m, u, h, b=None: (500, {}, b"oops"))
         with self.assertRaises(gh.GitHubError):
             client.get_pull(OWNER, NAME, 1)
 
     def test_oversized_response_raises(self):
-        client = self._client(lambda m, u, h: (200, {}, b"x" * 11), max_response_bytes=10)
+        client = self._client(lambda m, u, h, b=None: (200, {}, b"x" * 11), max_response_bytes=10)
         with self.assertRaises(gh.GitHubError):
             client.get_pull(OWNER, NAME, 1)
 
     def test_headers_and_url(self):
         seen = []
 
-        def transport(method, url, headers):
+        def transport(method, url, headers, body=None):
             seen.append((method, url, headers))
             return 200, {}, json.dumps({"commit": {"sha": "a" * 40}}).encode()
 
@@ -402,19 +402,19 @@ class GitHubClientTests(unittest.TestCase):
     def test_policy_size_checked_before_decode(self):
         payload = _content_payload("p.md", b"x" * 100)
         payload["size"] = 10 ** 6
-        client = self._client(lambda m, u, h: (200, {}, json.dumps(payload).encode()))
+        client = self._client(lambda m, u, h, b=None: (200, {}, json.dumps(payload).encode()))
         with self.assertRaises(gh.ValidationError):
             client.get_file_content(OWNER, NAME, ".github/ai-review.md", "a" * 40, 16 * 1024)
 
     def test_policy_must_be_regular_file(self):
-        client = self._client(lambda m, u, h: (200, {}, json.dumps({"type": "symlink", "size": 1}).encode()))
+        client = self._client(lambda m, u, h, b=None: (200, {}, json.dumps({"type": "symlink", "size": 1}).encode()))
         with self.assertRaises(gh.ValidationError):
             client.get_file_content(OWNER, NAME, ".github/ai-review.md", "a" * 40, 16 * 1024)
 
     def test_merge_base_uses_shas_and_handles_404(self):
         seen = []
 
-        def transport(method, url, headers):
+        def transport(method, url, headers, body=None):
             seen.append(url)
             return 404, {}, b"{}"
 
@@ -532,7 +532,7 @@ class PrepareStopTests(TempDirCase):
             self.assertIn(message, str(ctx.exception))
 
     def test_nonexistent_pr(self):
-        self._assert_stops(lambda m, u, h: (404, {}, b"{}"), prepare_review.PrepareError, message="does not exist")
+        self._assert_stops(lambda m, u, h, b=None: (404, {}, b"{}"), prepare_review.PrepareError, message="does not exist")
 
     def test_closed_pr(self):
         fake = FakeGitHub(self.shas)

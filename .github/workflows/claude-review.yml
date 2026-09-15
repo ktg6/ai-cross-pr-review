@@ -1,7 +1,7 @@
 # 共通repository側のReusable Workflow。consumerはfull commit SHAで固定して呼び出す。
-# prepare（PR snapshot取得）とreview（Claudeによるread-onlyレビュー）を分離し、
-# GitHub権限とClaude Secretが同一jobに共存しないようにする。
-# publish jobはPhase 3で追加する。
+# prepare（PR snapshot取得）、review（Claudeによるread-onlyレビュー）、
+# publish（決定論的なPRコメント投稿）を分離し、GitHub write権限とClaude Secretが
+# 同一jobに共存しないようにする。
 name: AI Review (reusable)
 
 on:
@@ -105,3 +105,35 @@ jobs:
           path: ${{ runner.temp }}/ai-review-result/review-result.json
           if-no-files-found: error
           retention-days: 1
+
+  publish:
+    name: Publish review comment
+    needs: [prepare, review]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      comment_action: ${{ steps.publish.outputs.comment_action }}
+      comment_id: ${{ steps.publish.outputs.comment_id }}
+      head_sha: ${{ steps.publish.outputs.head_sha }}
+      snapshot_id: ${{ steps.publish.outputs.snapshot_id }}
+    # 唯一のwrite権限を持つjob。Claude Secretは受け取らない。
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Download normalized result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-review-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-result
+
+      # 投稿先とsnapshotはworkflow inputとprepareの出力で決まる。AI結果からは決まらない。
+      - name: Publish
+        id: publish
+        uses: $/actions/review-runtime
+        with:
+          step: publish
+          pr_number: ${{ inputs.pr_number }}
+          repository: ${{ github.repository }}
+          github_token: ${{ github.token }}
+          result_file: ${{ runner.temp }}/ai-review-result/review-result.json
+          expected_snapshot_id: ${{ needs.prepare.outputs.snapshot_id }}
