@@ -481,6 +481,16 @@ class AdapterTests(TempDirCase):
         self.assertNotIn(CANARY_TOKEN, joined)
         self.assertIn("[REDACTED]", joined)
 
+    def test_stdout_json_failure_is_logged_when_stderr_is_empty(self):
+        detail = run_review.failure_detail(
+            json.dumps({"subtype": "error_api_error", "result": "authentication failed"}).encode(),
+            b"",
+            CANARY_OAUTH,
+        )
+        self.assertIn("subtype=error_api_error", detail)
+        self.assertIn("result=authentication failed", detail)
+        self.assertNotIn(CANARY_OAUTH, detail)
+
 
 # -- normalization ---------------------------------------------------------------
 

@@ -65,6 +65,39 @@ def log(message: str) -> None:
     sys.stderr.write(f"run-review: {message}\n")
 
 
+def failure_detail(stdout: bytes, stderr: bytes, token: str | None) -> str:
+    """Return a short, redacted diagnostic for a failed Claude invocation.
+
+    Claude Code can report headless-run failures in its JSON stdout while
+    leaving stderr empty.  Log only the small, structured error fields so the
+    review bundle itself is not copied into the Actions log.
+    """
+    extra_values = (token,) if token else ()
+    stderr_text, _ = bundle_mod.redact_secrets(
+        bundle_mod.sanitize_text(stderr.decode("utf-8", "replace"), 400), extra_values
+    )
+    if stderr_text:
+        return stderr_text
+
+    try:
+        envelope = json.loads(stdout.decode("utf-8", "replace"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return f"no stderr; stdout_bytes={len(stdout)}"
+
+    if isinstance(envelope, dict):
+        fields: list[str] = []
+        for key in ("subtype", "error", "result"):
+            value = envelope.get(key)
+            if isinstance(value, (str, int, float, bool)) and value != "":
+                fields.append(f"{key}={value}")
+        if fields:
+            detail, _ = bundle_mod.redact_secrets(
+                bundle_mod.sanitize_text("; ".join(fields), 400), extra_values
+            )
+            return detail
+    return f"no stderr; stdout_bytes={len(stdout)}"
+
+
 # -- CLI verification ---------------------------------------------------------
 
 
@@ -284,11 +317,9 @@ def run_review(
         raise ReviewError(f"claude could not be executed: {err.__class__.__name__}") from None
     duration_ms = int((time.monotonic() - started) * 1000)
 
-    stderr_tail, _ = bundle_mod.redact_secrets(
-        bundle_mod.sanitize_text((proc.stderr or b"").decode("utf-8", "replace"), 400), (token,)
-    )
     if proc.returncode != 0:
-        log(f"claude failed (exit {proc.returncode}): {stderr_tail}")
+        detail = failure_detail(proc.stdout or b"", proc.stderr or b"", token)
+        log(f"claude failed (exit {proc.returncode}): {detail}")
         raise ReviewError("claude exited with a non-zero status")
 
     stdout = proc.stdout or b""
