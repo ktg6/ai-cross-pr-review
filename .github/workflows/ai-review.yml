@@ -64,7 +64,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: ktg6/ai-cross-pr-review/.github/workflows/claude-review.yml@820ecc6eec5cdbe816f0cd8a5ce9dfec434a233d
+    uses: ktg6/ai-cross-pr-review/.github/workflows/claude-review.yml@b780e1a3949e7be67021a69c14cfb9a555ec78b9
     with:
       pr_number: ${{ needs.validate.outputs.pr_number }}
     secrets:
