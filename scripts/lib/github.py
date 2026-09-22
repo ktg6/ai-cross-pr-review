@@ -218,6 +218,14 @@ class GitHubClient:
             raise GitHubError("pull request payload is not an object")
         return data
 
+    def get_authenticated_login(self) -> str:
+        """Return the login of the account represented by the current token."""
+        data = self._get_json("/user")
+        login = data.get("login") if isinstance(data, dict) else None
+        if not isinstance(login, str) or not login.strip():
+            raise GitHubError("authenticated user payload missing login")
+        return login
+
     def get_branch_head_sha(self, owner: str, name: str, branch: str) -> str:
         branch = validate_branch_name(branch)
         quoted = urllib.parse.quote(branch, safe="")

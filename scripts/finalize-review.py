@@ -224,7 +224,28 @@ _BUCKET_BY_STATUS = {
 }
 
 
-def merge_review(claude: dict | None, codex: dict | None) -> tuple[dict, int]:
+def _unique_limited(values: list[str], maximum: int) -> list[str]:
+    """Deduplicate in source order and keep the final schema within its limit."""
+    if maximum <= 0:
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+        if len(result) >= maximum:
+            break
+    return result
+
+
+def merge_review(
+    claude: dict | None,
+    codex: dict | None,
+    *,
+    limits: limits_mod.Limits = limits_mod.DEFAULT_LIMITS,
+) -> tuple[dict, int]:
     """Merge both stages into the final buckets. Returns (review, dropped)."""
     buckets: dict[str, list[dict]] = {name: [] for name in result_mod.BUCKETS}
     insufficient: list[str] = []
@@ -243,6 +264,9 @@ def merge_review(claude: dict | None, codex: dict | None) -> tuple[dict, int]:
             for item in review.get("limitations") or []:
                 if isinstance(item, str) and item.strip():
                     limitations.append(item.strip())
+        normalization = claude.get("normalization")
+        if isinstance(normalization, dict) and isinstance(normalization.get("dropped_findings"), list):
+            dropped += len(normalization["dropped_findings"])
 
     claims: dict[int, dict] = {}
     if isinstance(codex, dict):
@@ -329,12 +353,33 @@ def merge_review(claude: dict | None, codex: dict | None) -> tuple[dict, int]:
     review = {
         "summary": " / ".join(summary_parts),
         "insufficient_context": insufficient,
-        "limitations": limitations,
+        "limitations": _unique_limited(limitations, limits.max_limitations),
         "dropped": dropped,
         "redactions": 0,
     }
     review.update(buckets)
     return review, dropped
+
+
+def _reference_consistency(claude: StageInput, codex: StageInput) -> bool:
+    """Require exactly one verification claim for every normalized Claude finding."""
+    if claude.status != "success" or codex.status != "success":
+        return False
+    claude_review = claude.document.get("review") if isinstance(claude.document, dict) else None
+    verification = codex.document.get("verification") if isinstance(codex.document, dict) else None
+    findings = claude_review.get("findings") if isinstance(claude_review, dict) else None
+    claims = verification.get("claim_reviews") if isinstance(verification, dict) else None
+    if not isinstance(findings, list) or not isinstance(claims, list):
+        return False
+    indices = [
+        claim.get("claude_index")
+        for claim in claims
+        if isinstance(claim, dict)
+        and isinstance(claim.get("claude_index"), int)
+        and not isinstance(claim.get("claude_index"), bool)
+    ]
+    expected = set(range(len(findings)))
+    return len(indices) == len(expected) and set(indices) == expected
 
 
 def _failure_summary(claude: StageInput, codex: StageInput) -> str:
@@ -432,7 +477,7 @@ def finalize(
     snapshot = _snapshot_block(claude_stage, codex_stage, request, prepare_snapshot)
 
     both_ok = claude_stage.status == "success" and codex_stage.status == "success"
-    review, _dropped = merge_review(claude_stage.document, codex_stage.document)
+    review, _dropped = merge_review(claude_stage.document, codex_stage.document, limits=limits)
     if not review["summary"]:
         review["summary"] = _failure_summary(claude_stage, codex_stage)
     if not both_ok:
@@ -444,10 +489,7 @@ def finalize(
         "snapshot_match": bool(snapshot) and claude_match and codex_match,
         "claude_fingerprint_match": claude_match,
         "codex_fingerprint_match": codex_match,
-        # Referential integrity is enforced by the normalizers: anything outside
-        # the snapshot or the primary review was dropped before this step, so a
-        # usable verification document is consistent by construction.
-        "reference_consistency": codex_stage.status == "success",
+        "reference_consistency": _reference_consistency(claude_stage, codex_stage),
         "finalized": True,
     }
 

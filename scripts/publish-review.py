@@ -124,21 +124,30 @@ def assert_snapshot_is_current(pr: dict | None, snapshot: dict) -> None:
 # -- comment selection --------------------------------------------------------
 
 
-def find_existing_comment(comments: list[dict], snapshot_id: str) -> dict | None:
+def find_existing_comment(
+    comments: list[dict], snapshot_id: str, *, authenticated_login: str | None = None
+) -> dict | None:
     """Return our own comment for this snapshot, if one is already there.
 
-    A comment only qualifies when the marker is its first line *and* its author
-    is a bot. A PR author can copy the marker text into a comment, but cannot
-    make that comment appear to come from a bot account, so a forged marker
-    cannot redirect the update (and GitHub would reject editing it anyway).
+    Bot comments remain supported for GitHub Actions identities. For a
+    fine-grained PAT, GitHub reports the author as ``User``; that case is only
+    accepted when its login matches the identity returned by ``/user``.
     """
     matches = []
     for comment in comments:
         if render_mod.read_marker(comment.get("body")) != snapshot_id:
             continue
         user = comment.get("user")
-        if not isinstance(user, dict) or user.get("type") != "Bot":
-            log("ignoring a comment that carries our marker but was not written by a bot")
+        is_bot = isinstance(user, dict) and user.get("type") == "Bot"
+        is_authenticated_user = (
+            isinstance(user, dict)
+            and user.get("type") == "User"
+            and isinstance(authenticated_login, str)
+            and isinstance(user.get("login"), str)
+            and user["login"].casefold() == authenticated_login.casefold()
+        )
+        if not is_bot and not is_authenticated_user:
+            log("ignoring a comment that carries our marker but was not written by the publisher")
             continue
         try:
             matches.append((gh.validate_comment_id(comment.get("id")), comment))
@@ -217,7 +226,10 @@ def publish(
     body = render_mod.render_comment(document, limits)
 
     comments = client.list_issue_comments(owner, name, number, max_pages=limits.max_comment_pages)
-    existing = find_existing_comment(comments, snapshot["snapshot_id"])
+    authenticated_login = client.get_authenticated_login()
+    existing = find_existing_comment(
+        comments, snapshot["snapshot_id"], authenticated_login=authenticated_login
+    )
     # Comment pagination can take long enough for the PR to move. Close the
     # check/use window as much as the GitHub API permits by checking again
     # immediately before the only write in this process.

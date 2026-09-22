@@ -64,11 +64,14 @@ def pull_payload(*, state: str = "open", head: str = HEAD_SHA, base: str = BASE_
     return {"number": PR_NUMBER, "state": state, "merged": merged, "head": {"sha": head}, "base": {"sha": base}}
 
 
-def comment(body: str, *, comment_id: int = 11, bot: bool = True) -> dict:
+def comment(body: str, *, comment_id: int = 11, bot: bool = True, login: str | None = None) -> dict:
     return {
         "id": comment_id,
         "body": body,
-        "user": {"login": "github-actions[bot]" if bot else "contributor", "type": "Bot" if bot else "User"},
+        "user": {
+            "login": login or ("github-actions[bot]" if bot else "contributor"),
+            "type": "Bot" if bot else "User",
+        },
     }
 
 
@@ -83,6 +86,7 @@ class FakeGitHub:
         self.requests: list[tuple[str, str, object]] = []
         self.failures = list(failures or [])
         self._next_id = 900
+        self.authenticated_login = "review-bot"
 
     @property
     def writes(self) -> list[tuple[str, str, object]]:
@@ -104,6 +108,8 @@ class FakeGitHub:
             if self.pull is None:
                 return 404, {}, b'{"message":"Not Found"}'
             return 200, {}, json.dumps(self.pull).encode()
+        if method == "GET" and path == "/user":
+            return 200, {}, json.dumps({"login": self.authenticated_login}).encode()
         if method == "GET" and path == f"{base}/issues/{PR_NUMBER}/comments":
             per_page = int(query.get("per_page", 100))
             page = int(query.get("page", 1))
@@ -506,7 +512,8 @@ class CommentIdentityTests(PublishCase):
         fake = FakeGitHub()
         self.publish(fake)
         for _method, url, _payload in fake.requests:
-            self.assertTrue(url.startswith("https://api.github.com/repos/acme/widgets/"), url)
+            if not url.endswith("/user"):
+                self.assertTrue(url.startswith("https://api.github.com/repos/acme/widgets/"), url)
 
     def test_rerun_of_the_same_snapshot_updates_in_place(self):
         fake = FakeGitHub()
@@ -528,6 +535,14 @@ class CommentIdentityTests(PublishCase):
         outcome = self.publish(fake)
         self.assertEqual(outcome["action"], "created")
         self.assertEqual(fake.comments[0]["body"].split("\n", 1)[1], "hi")
+
+    def test_marker_from_the_pat_identity_is_updated(self):
+        fake = FakeGitHub(
+            comments=[comment(render_mod.marker(SNAPSHOT_ID) + "\nold", bot=False, login="review-bot")]
+        )
+        outcome = self.publish(fake)
+        self.assertEqual(outcome["action"], "updated")
+        self.assertEqual([method for method, _url, _payload in fake.writes], ["PATCH"])
 
     def test_marker_quoted_inside_a_comment_is_ignored(self):
         fake = FakeGitHub(comments=[comment("> " + render_mod.marker(SNAPSHOT_ID))])

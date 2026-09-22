@@ -116,6 +116,23 @@ class BucketingTests(FinalizeCase):
         self.assertEqual([e["claude_index"] for e in deferred], [1])
         self.assertIn("未検証", deferred[0]["rationale"])
         self.assertGreaterEqual(document["review"]["dropped"], 1)
+        self.assertFalse(document["publishable"])
+
+    def test_claude_dropped_findings_are_carried_into_the_final_count(self):
+        claude = claude_document()
+        claude["normalization"]["dropped_findings"] = [{"index": 0, "reason": "outside snapshot"}]
+        document, _ = self.finalize(claude=claude)
+        self.assertEqual(document["review"]["dropped"], 1)
+
+    def test_combined_limitations_are_deduplicated_and_bounded(self):
+        claude = claude_document()
+        claude["review"]["limitations"] = [f"shared-{i}" for i in range(6)]
+        codex = codex_document(verification=codex_payload())
+        codex["verification"]["limitations"] = ["shared-0"] + [f"codex-{i}" for i in range(6)]
+        document, _ = self.finalize(claude=claude, codex=codex)
+        self.assertEqual(len(document["review"]["limitations"]), limits_mod.DEFAULT_LIMITS.max_limitations)
+        self.assertEqual(document["review"]["limitations"][:6], [f"shared-{i}" for i in range(6)])
+        self.assertEqual(document["review"]["limitations"][6:], [f"codex-{i}" for i in range(4)])
 
     def test_insufficient_context_and_limitations_reach_the_result(self):
         document, _ = self.finalize()
