@@ -13,7 +13,7 @@ from dataclasses import dataclass, asdict
 
 # Framework identity. Recorded in every bundle so downstream jobs can verify
 # they are consuming output from a known producer.
-FRAMEWORK_VERSION = "0.2.0"
+FRAMEWORK_VERSION = "0.3.0"
 BUNDLE_SCHEMA_VERSION = "1"
 # Version of the model-output schema (schemas/review-result.schema.json) and of
 # the normalized result written by scripts/normalize-review.py.
@@ -33,8 +33,21 @@ CLAUDE_CODE_SHA256: dict[str, str] = {
     "darwin-arm64": "ef5d2909c8af49f31ab6d5487e90316777bc2fac170adfe8160716caa8aaf4f9",
 }
 
-# Model provider recorded in the trusted wrapper. The model itself never sets it.
+# Model providers recorded in the trusted wrapper. A model never sets its own.
 REVIEW_PROVIDER = "anthropic-claude-code-cli"
+CODEX_PROVIDER = "openai-responses-api"
+
+# OpenAI Responses API endpoint used by the verification stage (ADR-0007).
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com"
+CODEX_API_PATH = "/v1/responses"
+
+# Version of the final, merged result document written by finalize-review.py.
+FINAL_SCHEMA_VERSION = "1"
+
+# Where the review policy came from. Recorded in every result.
+POLICY_SOURCES: tuple[str, ...] = ("repository", "central_default")
+# Central fallback policy, relative to the repository root.
+DEFAULT_POLICY_RELPATH = "policies/default-review-policy.md"
 
 KIB = 1024
 
@@ -71,6 +84,9 @@ SNAPSHOT_KEYS: tuple[str, ...] = (
     "diff_sha256",
     "policy_commit_sha",
     "policy_blob_sha",
+    "policy_source",
+    "policy_present",
+    "is_fork",
     "snapshot_id",
     "reviewable_path_hashes",
 )
@@ -92,6 +108,140 @@ NORMALIZATION_KEYS: tuple[str, ...] = (
 )
 DROPPED_FINDING_KEYS: tuple[str, ...] = ("index", "reason")
 MAX_FINDING_LINE = 1000000
+
+# -- Verification stage (Codex) vocabulary (ADR-0006, ADR-0007) ---------------
+
+# Status of each Claude finding after the verification stage.
+CLAIM_STATUSES: tuple[str, ...] = ("adopted", "duplicate", "rejected", "deferred")
+
+CODEX_RESULT_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "summary",
+    "claim_reviews",
+    "additional_findings",
+    "insufficient_context",
+    "limitations",
+)
+CLAIM_REVIEW_KEYS: tuple[str, ...] = (
+    "claude_index",
+    "status",
+    "severity",
+    "confidence",
+    "rationale",
+    "suggested_fix",
+    "duplicate_of",
+)
+CODEX_FINDING_KEYS: tuple[str, ...] = (
+    "title",
+    "detail",
+    "severity",
+    "confidence",
+    "category",
+    "path",
+    "line",
+    "suggested_fix",
+)
+CODEX_NORMALIZED_RESULT_KEYS: tuple[str, ...] = (
+    "result_schema_version",
+    "framework_version",
+    "stage",
+    "snapshot",
+    "run",
+    "normalization",
+    "verification",
+)
+CODEX_RUN_KEYS: tuple[str, ...] = (
+    "provider",
+    "endpoint",
+    "model_requested",
+    "model_reported",
+    "effort",
+    "tools_enabled",
+    "store",
+    "run_id",
+    "response_id",
+    "status",
+    "input_tokens",
+    "output_tokens",
+    "duration_ms",
+)
+CODEX_NORMALIZATION_KEYS: tuple[str, ...] = (
+    "dropped_claim_reviews",
+    "dropped_findings",
+    "redactions",
+)
+
+# -- Final merged document (ADR-0005, ADR-0006) -------------------------------
+
+# Execution state of one stage. "skipped" means the job never ran because an
+# earlier stage failed; it is never rendered as "no issues".
+STAGE_STATUSES: tuple[str, ...] = ("success", "failed", "skipped", "missing", "invalid")
+
+FINAL_RESULT_KEYS: tuple[str, ...] = (
+    "final_schema_version",
+    "framework_version",
+    "request",
+    "snapshot",
+    "stages",
+    "verification",
+    "review",
+    "publishable",
+)
+FINAL_REQUEST_KEYS: tuple[str, ...] = (
+    "repository",
+    "pr_number",
+    "output_mode",
+    "claude_model_requested",
+    "codex_model_requested",
+    "claude_effort",
+    "codex_effort",
+    "policy_path",
+)
+FINAL_STAGE_KEYS: tuple[str, ...] = (
+    "status",
+    "model_requested",
+    "model_reported",
+    "detail",
+)
+FINAL_VERIFICATION_KEYS: tuple[str, ...] = (
+    "schema_valid",
+    "snapshot_match",
+    "claude_fingerprint_match",
+    "codex_fingerprint_match",
+    "reference_consistency",
+    "finalized",
+)
+# One entry in any of the final review buckets. The same shape is used for
+# adopted, added, deferred, rejected and duplicate entries so that the renderer
+# and the publisher validate a single structure.
+FINAL_ENTRY_KEYS: tuple[str, ...] = (
+    "origin",
+    "claude_index",
+    "title",
+    "detail",
+    "severity",
+    "confidence",
+    "category",
+    "path",
+    "line",
+    "rationale",
+    "suggested_fix",
+    "duplicate_of",
+)
+ENTRY_ORIGINS: tuple[str, ...] = ("claude", "codex")
+
+FINAL_REVIEW_KEYS: tuple[str, ...] = (
+    "summary",
+    "adopted",
+    "added",
+    "deferred",
+    "rejected",
+    "duplicates",
+    "insufficient_context",
+    "limitations",
+    "dropped",
+    "redactions",
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +284,20 @@ class Limits:
     max_comment_pages: int = 10
     publish_retry_attempts: int = 3
     publish_retry_delay_seconds: float = 2.0
+    # Phase 5: verification stage (OpenAI Responses API) and final merge.
+    codex_timeout_seconds: int = 600
+    codex_max_output_tokens: int = 16000
+    codex_retry_attempts: int = 3
+    codex_retry_delay_seconds: float = 2.0
+    max_claim_reviews: int = 20
+    max_additional_findings: int = 20
+    max_insufficient_context: int = 10
+    max_rationale_chars: int = 2000
+    max_suggested_fix_chars: int = 2000
+    # The merged document carries both stages, so it is larger than either one.
+    max_final_result_bytes: int = 256 * KIB
+    # GitHub truncates a job summary above 1 MiB; stay well below it.
+    max_job_summary_chars: int = 500000
 
     def as_dict(self) -> dict:
         return asdict(self)

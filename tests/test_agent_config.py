@@ -416,7 +416,7 @@ class CanonicalInstructionsTest(unittest.TestCase):
         # Existing user rules preserved.
         for rule in ("`git push`", "`sudo`", "`rm -rf`", "`terraform apply`",
                      "`terraform destroy`", "`~/.aws/*`", "`~/.ssh/*`", "`.env*`",
-                     "`terraform.tfstate*`", "READMEを更新しない", "回答は日本語で行う"):
+                     "`terraform.tfstate*`", "回答は日本語で行う"):
             self.assertIn(rule, text)
         self.assertIn(".ai/rules/security.md", text)
         self.assertIn(".ai/rules/review.md", text)
@@ -427,6 +427,64 @@ class CanonicalInstructionsTest(unittest.TestCase):
         self.assertIn("- Claude Code: 設計・コード・security Reviewer", text)
         self.assertIn("- OpenCode + local LLM: Auxiliary Reviewer", text)
         self.assertNotIn("Claude Code: Main Implementer", text)
+
+    def test_readme_policy_is_conditional_and_bounded(self):
+        text = AGENTS_MD.read_text(encoding="utf-8")
+        output = text.split("## Output", 1)[1].split("## Definition of Done", 1)[0]
+        # The blanket README ban is gone ...
+        self.assertNotIn("READMEを更新しない", text)
+        # ... replaced by a conditional permission with explicit limits (ADR-0009).
+        for rule in (
+            "利用者向け情報に実質的な変更がある場合",
+            "README更新は常に必須ではない",
+            "Secret、credential、token、内部限定情報を書かない",
+            "自動生成された大量docsを無条件に追加しない",
+            "`docs/plan/`",
+            "`docs/adr/`",
+        ):
+            self.assertIn(rule, output)
+        # The approved Plan / ADR management rules are unchanged.
+        adr = text.split("## ADR", 1)[1].split("## Output", 1)[0]
+        for rule in ("Accepted ADRの理由を後から書き換えない", "`Supersedes ADR-XXXX`", "`Superseded`", "番号を再利用しない"):
+            self.assertIn(rule, adr)
+
+    def test_two_stage_architecture_is_stated_in_the_ssot(self):
+        text = AGENTS_MD.read_text(encoding="utf-8")
+        for rule in (
+            "中央実行repository",
+            "`workflow_dispatch`",
+            "`validate_request`",
+            "`claude_review`",
+            "`codex_review`",
+            "`finalize`",
+            "`report`",
+            "`comment`",
+            "`summary_only`",
+            "`pr_comment`",
+            "untrusted",
+            "allowlist",
+            "snapshot fingerprint",
+            "「問題なし」として扱わない",
+        ):
+            self.assertIn(rule, text)
+
+    def test_no_stale_rule_contradicts_the_two_stage_design(self):
+        # Rules written for the old "Claude and Codex never see each other" design
+        # must not survive anywhere an agent might read them.
+        stale = ("Claudeのレビュー結果をCodexへ事前に渡さない", "Claudeのレビュー結果をCodexへ事前に渡す")
+        for path in (AGENTS_MD, CLAUDE_MD, *sorted(RULES_DIR.glob("*.md"))):
+            text = path.read_text(encoding="utf-8")
+            for phrase in stale:
+                self.assertNotIn(phrase, text, path.name)
+        review_rules = (RULES_DIR / "review.md").read_text(encoding="utf-8")
+        self.assertIn("untrusted", review_rules)
+        self.assertIn("allowlist", review_rules)
+        self.assertIn("snapshot fingerprint", review_rules)
+
+    def test_adapters_do_not_restate_the_readme_policy(self):
+        for path in (CLAUDE_MD, RULES_DIR / "security.md", RULES_DIR / "review.md"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("READMEを更新", text, path.name)
 
     def test_claude_md_is_thin_adapter(self):
         self.assertFalse(CLAUDE_MD.is_symlink())
@@ -487,6 +545,36 @@ class ProjectSkeletonTest(unittest.TestCase):
             self.assertIsNotNone(status, path.name)
             self.assertIn(status.group(1),
                           {"Proposed", "Accepted", "Superseded", "Deprecated"}, path.name)
+
+    def test_readme_describes_the_central_design_without_secrets(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        # Secret *names* and required permissions may be documented; values may not.
+        for name in ("AI_REVIEW_READ_TOKEN", "AI_REVIEW_COMMENT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"):
+            self.assertIn(name, readme)
+        for needle in ("summary_only", "pr_comment", "workflow_dispatch", "central_default", "受理"):
+            self.assertIn(needle, readme)
+        # The consumer-wrapper installation steps no longer apply.
+        for stale in ("thin wrapper", "Reusable Workflow @ full commit SHA", "ai-review.yml", "claude-review.yml"):
+            self.assertNotIn(stale, readme)
+        for pattern in SECRET_PATTERNS:
+            self.assertIsNone(pattern.search(readme), pattern.pattern)
+
+    def test_no_secret_like_values_in_the_review_infrastructure_files(self):
+        paths = [
+            ROOT / "README.md",
+            ROOT / "prompts" / "review.md",
+            ROOT / "prompts" / "codex-verify.md",
+            ROOT / "policies" / "default-review-policy.md",
+            ROOT / "actions" / "review-runtime" / "action.yml",
+            *sorted((ROOT / ".github" / "workflows").glob("*.yml")),
+            *sorted((ROOT / "schemas").glob("*.json")),
+            *sorted((ROOT / "docs" / "plan").glob("*.md")),
+            *sorted((ROOT / "scripts").rglob("*.py")),
+        ]
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            for pattern in SECRET_PATTERNS:
+                self.assertIsNone(pattern.search(text), f"{path.name}: {pattern.pattern}")
 
     def test_no_secret_like_values_in_phase0_files(self):
         for path in PHASE0_FILES + sorted(ADR_DIR.glob("*.md")):

@@ -169,19 +169,51 @@ def build_pr_metadata(pr: dict, snap: PullSnapshot, limits: limits_mod.Limits) -
     return meta
 
 
-def load_policy(client: gh.GitHubClient, owner: str, name: str, snap: PullSnapshot, policy_path: str, limits: limits_mod.Limits) -> tuple[str, bytes | None]:
-    """Fetch the repository review policy from the default branch's pinned SHA."""
-    commit_sha = client.get_branch_head_sha(owner, name, snap.default_branch)
-    raw = client.get_file_content(owner, name, policy_path, commit_sha, limits.max_policy_bytes)
-    if raw is None:
-        return commit_sha, None
+def _check_policy_bytes(raw: bytes, what: str, limits: limits_mod.Limits) -> bytes:
+    """A policy must be UTF-8 text within the limit. Anything else stops the run."""
+    limits_mod.check_limit(f"{what} size", len(raw), limits.max_policy_bytes)
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        raise PrepareError("review policy is not valid UTF-8") from None
+        raise PrepareError(f"{what} is not valid UTF-8") from None
     if "\x00" in text:
-        raise PrepareError("review policy contains NUL bytes")
-    return commit_sha, raw
+        raise PrepareError(f"{what} contains NUL bytes")
+    if not text.strip():
+        raise PrepareError(f"{what} is empty")
+    return raw
+
+
+def load_policy(
+    client: gh.GitHubClient,
+    owner: str,
+    name: str,
+    snap: PullSnapshot,
+    policy_path: str,
+    limits: limits_mod.Limits,
+    default_policy_file: Path | None = None,
+) -> tuple[str, bytes, str, bool]:
+    """Resolve the review policy for this snapshot.
+
+    Returns ``(default_branch_commit_sha, policy_bytes, source, present)``.
+
+    The target repository's policy is read from the default branch's pinned
+    commit, never from the PR head. When it is absent, the central fallback
+    policy is used and recorded as such, so a missing policy never silently
+    means "no rules". A present-but-broken or oversized policy is a stop: the
+    operator asked for those rules and we cannot honour them.
+    """
+    commit_sha = client.get_branch_head_sha(owner, name, snap.default_branch)
+    raw = client.get_file_content(owner, name, policy_path, commit_sha, limits.max_policy_bytes)
+    if raw is not None:
+        return commit_sha, _check_policy_bytes(raw, "review policy", limits), "repository", True
+
+    if default_policy_file is None:
+        raise PrepareError("no repository policy and no central default policy configured")
+    try:
+        fallback = Path(default_policy_file).read_bytes()
+    except OSError as err:
+        raise PrepareError(f"cannot read the central default policy: {err.__class__.__name__}") from None
+    return commit_sha, _check_policy_bytes(fallback, "central default policy", limits), "central_default", False
 
 
 def build_remote_url(server_url: str, owner: str, name: str, with_username: bool) -> str:
@@ -210,7 +242,9 @@ def write_bundle(
     merge_base_sha: str,
     policy_path: str,
     policy_commit_sha: str,
-    policy: bytes | None,
+    policy: bytes,
+    policy_source: str,
+    policy_present: bool,
     pr_metadata: dict,
     files: list[diff_mod.ChangedFile],
     limits: limits_mod.Limits,
@@ -222,12 +256,12 @@ def write_bundle(
         "pr-metadata.json": json_bytes(pr_metadata),
         "files.json": json_bytes([f.to_json() for f in files]),
         "diff.patch": patch,
+        # Always present: either the repository policy or the central default.
+        "policy.md": policy,
     }
-    if policy is not None:
-        contents["policy.md"] = policy
 
     diff_sha = sha256_hex(patch)
-    policy_blob = git_blob_sha(policy) if policy is not None else None
+    policy_blob = git_blob_sha(policy)
     snapshot_id = sha256_hex(
         "\n".join(
             [
@@ -238,7 +272,8 @@ def write_bundle(
                 snap.head_sha,
                 merge_base_sha,
                 policy_commit_sha,
-                policy_blob or "-",
+                policy_source,
+                policy_blob,
                 diff_sha,
             ]
         ).encode("utf-8")
@@ -254,11 +289,13 @@ def write_bundle(
         "is_fork": snap.is_fork,
         "policy": {
             "path": policy_path,
-            "source": "default_branch",
+            # "repository" = the target repository's default branch,
+            # "central_default" = the fallback shipped with this framework.
+            "source": policy_source,
             "commit_sha": policy_commit_sha,
             "blob_sha": policy_blob,
-            "present": policy is not None,
-            "bytes": len(policy) if policy is not None else 0,
+            "present": policy_present,
+            "bytes": len(policy),
         },
         "diff": {
             "sha256": diff_sha,
@@ -304,6 +341,7 @@ def prepare(
     api_url: str = DEFAULT_API_URL,
     server_url: str = DEFAULT_SERVER_URL,
     policy_path: str = DEFAULT_POLICY_PATH,
+    default_policy_file: Path | None = None,
     limits: limits_mod.Limits = limits_mod.DEFAULT_LIMITS,
     transport: gh.Transport | None = None,
     runner_factory=None,
@@ -329,9 +367,12 @@ def prepare(
     log(f"pr #{number} head={snap.head_sha} base={snap.base_sha} fork={snap.is_fork}")
     pr_metadata = build_pr_metadata(pr, snap, limits)
 
-    # 4. Policy from the default branch's pinned commit (never the PR head).
-    policy_commit_sha, policy = load_policy(client, owner, name, snap, policy_path, limits)
-    log(f"policy commit={policy_commit_sha} present={policy is not None}")
+    # 4. Policy from the default branch's pinned commit (never the PR head),
+    #    falling back to the central default policy when it is absent.
+    policy_commit_sha, policy, policy_source, policy_present = load_policy(
+        client, owner, name, snap, policy_path, limits, default_policy_file
+    )
+    log(f"policy commit={policy_commit_sha} source={policy_source} present={policy_present}")
 
     # 3 (cont.) merge-base between fixed SHAs.
     merge_base_sha = client.get_merge_base_sha(owner, name, snap.base_sha, snap.head_sha)
@@ -382,6 +423,8 @@ def prepare(
         policy_path=policy_path,
         policy_commit_sha=policy_commit_sha,
         policy=policy,
+        policy_source=policy_source,
+        policy_present=policy_present,
         pr_metadata=pr_metadata,
         files=files,
         limits=limits,
@@ -402,6 +445,9 @@ def prepare(
                 "base_sha": snap.base_sha,
                 "merge_base_sha": merge_base_sha,
                 "policy_sha": policy_commit_sha,
+                "policy_source": policy_source,
+                "policy_present": "true" if policy_present else "false",
+                "is_fork": "true" if snap.is_fork else "false",
                 "diff_sha256": manifest["diff"]["sha256"],
                 "snapshot_id": manifest["snapshot_id"],
                 "bundle_dir": str(output_dir),
@@ -419,6 +465,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
     parser.add_argument("--server-url", default=DEFAULT_SERVER_URL)
     parser.add_argument("--policy-path", default=DEFAULT_POLICY_PATH)
+    parser.add_argument(
+        "--default-policy-file",
+        default=str(Path(__file__).resolve().parents[1] / limits_mod.DEFAULT_POLICY_RELPATH),
+        help="central fallback policy used when the target repository has none",
+    )
     return parser.parse_args(argv)
 
 
@@ -435,6 +486,7 @@ def main(argv: list[str] | None = None) -> int:
             api_url=args.api_url,
             server_url=args.server_url,
             policy_path=args.policy_path,
+            default_policy_file=Path(args.default_policy_file) if args.default_policy_file else None,
         )
     except (PrepareError, gh.ValidationError, gh.GitHubError, diff_mod.GitError, limits_mod.LimitExceeded) as err:
         log(f"stop: {err}")

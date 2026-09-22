@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-0006
 
 ## Context
 
@@ -102,3 +102,4 @@ Promptだけでは防御にならない。filesystem境界、tool制限、GitHub
 - Claude Code CLI reference（code.claude.com/docs/en/cli-reference）、headless（同/headless）
 - `anthropics/claude-code-action`の`action.yml`、`base-action/action.yml`、`docs/security.md`、`src/github/token.ts`、`src/modes/agent/index.ts`
 - ADR-0001、ADR-0004
+- ADR-0006（後継。[0006-cross-review-trust-boundaries.md](0006-cross-review-trust-boundaries.md)）

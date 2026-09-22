@@ -1,0 +1,395 @@
+# 信頼された非公開の中央実行repositoryに置く、唯一のレビュー起動workflow。
+# 対象repositoryにはworkflowを追加しない（ADR-0005）。
+#
+# 入口はworkflow_dispatchだけである。workflow_callは提供しない。すべての入力は
+# validate_request jobのallowlistを通り、後続jobはそのjob outputだけを読む。
+#
+# AI jobはGitHub credentialを持たない。PRコメントはcomment jobだけが行い、
+# summary_onlyではcomment job自体が実行されない（ADR-0006、ADR-0008）。
+name: AI Cross Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repository:
+        description: レビュー対象のrepository（owner/name）。
+        required: true
+        type: string
+      pull_request:
+        description: レビュー対象のPR番号またはPR URL。
+        required: true
+        type: string
+      output_mode:
+        description: 出力モード。summary_onlyはPRへ投稿しない。
+        required: true
+        type: choice
+        default: summary_only
+        options:
+          - summary_only
+          - pr_comment
+      claude_model:
+        description: 一次レビューに使用するmodel（動作確認済みのみ）。
+        required: true
+        type: choice
+        default: claude-opus-5
+        options:
+          - claude-opus-5
+          - claude-sonnet-5
+      codex_model:
+        description: 再検証に使用するmodel（動作確認済みのみ）。
+        required: true
+        type: choice
+        default: gpt-5.6-sol
+        options:
+          - gpt-6-astra
+          - gpt-5.6-sol
+          - gpt-5.6-terra
+          - gpt-5.6-luna
+      claude_effort:
+        description: 一次レビューのeffort level。
+        required: true
+        type: choice
+        default: high
+        options:
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
+      codex_effort:
+        description: 再検証のreasoning effort level。
+        required: true
+        type: choice
+        default: high
+        options:
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
+      policy_path:
+        description: 対象repositoryのdefault branch上にあるreview policyのpath。
+        required: false
+        type: string
+        default: .github/ai-review.md
+
+# 既定は無権限。中央repositoryのGITHUB_TOKENは対象repositoryへ到達しないため、
+# 対象repositoryへのアクセスはjob限定のSecretで行う。
+permissions: {}
+
+concurrency:
+  group: ai-cross-review-${{ inputs.target_repository }}-${{ inputs.pull_request }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate_request:
+    name: Validate request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # 中央repositoryのcheckoutにだけ使うread権限。GITHUB_TOKENは中央repositoryにしか届かず、
+    # 対象repositoryのPRへは到達しない。stepへは渡さず、persist-credentials: falseで保持もしない。
+    permissions:
+      contents: read
+    outputs:
+      repository: ${{ steps.validate.outputs.repository }}
+      pr_number: ${{ steps.validate.outputs.pr_number }}
+      output_mode: ${{ steps.validate.outputs.output_mode }}
+      claude_model: ${{ steps.validate.outputs.claude_model }}
+      codex_model: ${{ steps.validate.outputs.codex_model }}
+      claude_effort: ${{ steps.validate.outputs.claude_effort }}
+      codex_effort: ${{ steps.validate.outputs.codex_effort }}
+      policy_path: ${{ steps.validate.outputs.policy_path }}
+    steps:
+      # 中央実行repository自身のscriptsだけをcheckoutする。対象PRのコードはcheckoutしない。
+      - name: Check out the central repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate
+        id: validate
+        uses: ./actions/review-runtime
+        with:
+          step: validate
+          repository: ${{ inputs.target_repository }}
+          pull_request: ${{ inputs.pull_request }}
+          output_mode: ${{ inputs.output_mode }}
+          claude_model: ${{ inputs.claude_model }}
+          codex_model: ${{ inputs.codex_model }}
+          claude_effort: ${{ inputs.claude_effort }}
+          codex_effort: ${{ inputs.codex_effort }}
+          policy_path: ${{ inputs.policy_path }}
+
+  prepare:
+    name: Prepare review bundle
+    needs: validate_request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # 中央repositoryのcheckoutにだけ使うread権限。GITHUB_TOKENは中央repositoryにしか届かず、
+    # 対象repositoryのPRへは到達しない。stepへは渡さず、persist-credentials: falseで保持もしない。
+    permissions:
+      contents: read
+    outputs:
+      head_sha: ${{ steps.prepare.outputs.head_sha }}
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      merge_base_sha: ${{ steps.prepare.outputs.merge_base_sha }}
+      policy_sha: ${{ steps.prepare.outputs.policy_sha }}
+      policy_source: ${{ steps.prepare.outputs.policy_source }}
+      policy_present: ${{ steps.prepare.outputs.policy_present }}
+      diff_sha256: ${{ steps.prepare.outputs.diff_sha256 }}
+      is_fork: ${{ steps.prepare.outputs.is_fork }}
+      snapshot_id: ${{ steps.prepare.outputs.snapshot_id }}
+    steps:
+      - name: Check out the central repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # read tokenだけを受け取る。metadata read / contents read / pull requests read。
+      - name: Build bundle
+        id: prepare
+        uses: ./actions/review-runtime
+        with:
+          step: prepare
+          repository: ${{ needs.validate_request.outputs.repository }}
+          pr_number: ${{ needs.validate_request.outputs.pr_number }}
+          policy_path: ${{ needs.validate_request.outputs.policy_path }}
+          github_token: ${{ secrets.AI_REVIEW_READ_TOKEN }}
+          output_dir: ${{ runner.temp }}/ai-review-bundle
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ai-review-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-bundle
+          if-no-files-found: error
+          retention-days: 1
+
+  claude_review:
+    name: Claude primary review
+    needs: [validate_request, prepare]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # GitHub権限を一切持たない。同一run内のartifactはActions runtime tokenで扱う。
+    # 中央repositoryのcheckoutにだけ使うread権限。GITHUB_TOKENは中央repositoryにしか届かず、
+    # 対象repositoryのPRへは到達しない。stepへは渡さず、persist-credentials: falseで保持もしない。
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the central repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-review-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-bundle
+
+      - name: Review
+        uses: ./actions/review-runtime
+        with:
+          step: review
+          bundle_dir: ${{ runner.temp }}/ai-review-bundle
+          output_dir: ${{ runner.temp }}/ai-review-claude-result
+          claude_model: ${{ needs.validate_request.outputs.claude_model }}
+          claude_effort: ${{ needs.validate_request.outputs.claude_effort }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+      - name: Upload primary review result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ai-review-claude-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-claude-result/review-result.json
+          if-no-files-found: error
+          retention-days: 1
+
+  codex_review:
+    name: Codex verification review
+    needs: [validate_request, prepare, claude_review]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # GitHub権限を一切持たない。一次レビュー結果はuntrusted dataとして扱う。
+    # 中央repositoryのcheckoutにだけ使うread権限。GITHUB_TOKENは中央repositoryにしか届かず、
+    # 対象repositoryのPRへは到達しない。stepへは渡さず、persist-credentials: falseで保持もしない。
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the central repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-review-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-bundle
+
+      - name: Download primary review result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-review-claude-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-claude-result
+
+      - name: Verify
+        uses: ./actions/review-runtime
+        with:
+          step: codex
+          bundle_dir: ${{ runner.temp }}/ai-review-bundle
+          claude_result_file: ${{ runner.temp }}/ai-review-claude-result/review-result.json
+          output_dir: ${{ runner.temp }}/ai-review-codex-result
+          codex_model: ${{ needs.validate_request.outputs.codex_model }}
+          codex_effort: ${{ needs.validate_request.outputs.codex_effort }}
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Upload verification result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ai-review-codex-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-codex-result/codex-result.json
+          if-no-files-found: error
+          retention-days: 1
+
+  finalize:
+    name: Finalize result
+    needs: [validate_request, prepare, claude_review, codex_review]
+    # 片方のstageが失敗しても最終結果を生成する。失敗は失敗として記録され、
+    # 「問題なし」には変換されない。
+    if: ${{ always() && needs.validate_request.result == 'success' && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # 中央repositoryのcheckoutにだけ使うread権限。GITHUB_TOKENは中央repositoryにしか届かず、
+    # 対象repositoryのPRへは到達しない。stepへは渡さず、persist-credentials: falseで保持もしない。
+    permissions:
+      contents: read
+    outputs:
+      publishable: ${{ steps.finalize.outputs.publishable }}
+      snapshot_id: ${{ steps.finalize.outputs.snapshot_id }}
+      claude_status: ${{ steps.finalize.outputs.claude_status }}
+      codex_status: ${{ steps.finalize.outputs.codex_status }}
+    steps:
+      - name: Check out the central repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download primary review result
+        if: ${{ needs.claude_review.result == 'success' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-review-claude-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-claude-result
+
+      - name: Download verification result
+        if: ${{ needs.codex_review.result == 'success' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-review-codex-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-codex-result
+
+      - name: Finalize
+        id: finalize
+        uses: ./actions/review-runtime
+        with:
+          step: finalize
+          repository: ${{ needs.validate_request.outputs.repository }}
+          pr_number: ${{ needs.validate_request.outputs.pr_number }}
+          output_mode: ${{ needs.validate_request.outputs.output_mode }}
+          claude_model: ${{ needs.validate_request.outputs.claude_model }}
+          codex_model: ${{ needs.validate_request.outputs.codex_model }}
+          claude_effort: ${{ needs.validate_request.outputs.claude_effort }}
+          codex_effort: ${{ needs.validate_request.outputs.codex_effort }}
+          policy_path: ${{ needs.validate_request.outputs.policy_path }}
+          expected_snapshot_id: ${{ needs.prepare.outputs.snapshot_id }}
+          head_sha: ${{ needs.prepare.outputs.head_sha }}
+          base_sha: ${{ needs.prepare.outputs.base_sha }}
+          merge_base_sha: ${{ needs.prepare.outputs.merge_base_sha }}
+          diff_sha256: ${{ needs.prepare.outputs.diff_sha256 }}
+          policy_source: ${{ needs.prepare.outputs.policy_source }}
+          policy_present: ${{ needs.prepare.outputs.policy_present }}
+          is_fork: ${{ needs.prepare.outputs.is_fork }}
+          claude_result_file: ${{ runner.temp }}/ai-review-claude-result/review-result.json
+          codex_result_file: ${{ runner.temp }}/ai-review-codex-result/codex-result.json
+          claude_job_result: ${{ needs.claude_review.result }}
+          codex_job_result: ${{ needs.codex_review.result }}
+          output_dir: ${{ runner.temp }}/ai-review-final
+
+      - name: Upload final result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ai-review-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-final
+          if-no-files-found: error
+          retention-days: 7
+
+  report:
+    name: Report to job summary
+    needs: [validate_request, prepare, claude_review, codex_review, finalize]
+    if: ${{ always() && needs.validate_request.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # 中央repositoryのcheckoutにだけ使うread権限。GITHUB_TOKENは中央repositoryにしか届かず、
+    # 対象repositoryのPRへは到達しない。stepへは渡さず、persist-credentials: falseで保持もしない。
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the central repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download final result
+        if: ${{ needs.finalize.result == 'success' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-review-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-final
+
+      - name: Report
+        uses: ./actions/review-runtime
+        with:
+          step: report
+          result_file: ${{ runner.temp }}/ai-review-final/final-review.json
+
+  comment:
+    name: Publish PR comment
+    needs: [validate_request, prepare, finalize, report]
+    # 投稿はpr_commentかつ投稿可の場合だけ。summary_onlyではこのjobが存在しないため、
+    # comment tokenはどのstepからも参照されない。
+    if: ${{ needs.validate_request.outputs.output_mode == 'pr_comment' && needs.finalize.outputs.publishable == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # 中央repositoryのcheckoutにだけ使うread権限。GITHUB_TOKENは中央repositoryにしか届かず、
+    # 対象repositoryのPRへは到達しない。stepへは渡さず、persist-credentials: falseで保持もしない。
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the central repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download final result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-review-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ai-review-final
+
+      # comment tokenだけを受け取る。AI providerのSecretは渡さない。
+      - name: Publish
+        id: publish
+        uses: ./actions/review-runtime
+        with:
+          step: publish
+          repository: ${{ needs.validate_request.outputs.repository }}
+          pr_number: ${{ needs.validate_request.outputs.pr_number }}
+          output_mode: ${{ needs.validate_request.outputs.output_mode }}
+          result_file: ${{ runner.temp }}/ai-review-final/final-review.json
+          expected_snapshot_id: ${{ needs.prepare.outputs.snapshot_id }}
+          github_token: ${{ secrets.AI_REVIEW_COMMENT_TOKEN }}

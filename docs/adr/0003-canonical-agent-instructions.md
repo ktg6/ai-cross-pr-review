@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-0009
 
 ## Context
 
@@ -43,3 +43,4 @@ Claude Code、Codex、OpenCodeはそれぞれ異なるinstruction fileとpermiss
 - Claude Code permissions / settings docs（code.claude.com/docs/en/permissions, /settings）
 - Codex config reference / rules docs（learn.chatgpt.com/docs/config-file/config-reference, /docs/agent-configuration/rules）
 - OpenCode permissions docs / schema（opencode.ai/docs/permissions, opencode.ai/config.json）
+- ADR-0009（後継。[0009-documentation-and-readme-policy.md](0009-documentation-and-readme-policy.md)）

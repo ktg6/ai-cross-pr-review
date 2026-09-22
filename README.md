@@ -1,110 +1,140 @@
 # ai-cross-pr-review
 
-GitHub Actions上でClaude CodeによるPull Requestレビューを実行する、再利用可能なレビュー基盤である。
+GitHub Actions 上で、Claude が初期レビューを行い、Codex が同一スナップショットを再検証する二段階の PR レビュー基盤である。
 
-Consumer repositoryには手動起動用のthin wrapperだけを配置する。レビュー本体は本repositoryのReusable Workflowが担当し、PRコードを実行せず、AIへGitHubの書き込み権限を渡さない。
-
-Phase 0〜4のMVPを実装済みである。
+レビュー対象 repository には何も追加しない。レビューは、信頼された非公開の**中央実行 repository**（本 repository）から手動起動する。PR のコードは checkout も実行もせず、AI に GitHub の書き込み権限を渡さない。
 
 ## 仕組み
 
 ```text
+中央実行 repository（本 repository）
+└── workflow_dispatch: AI Cross Review
+    ├── validate_request  入力の allowlist 検証
+    ├── prepare           対象 PR の snapshot を固定して取得（read token）
+    ├── claude_review     一次レビュー（Claude、GitHub credential なし）
+    ├── codex_review      再検証（Codex、GitHub credential なし）
+    ├── finalize          検証・突合・無害化・整形
+    ├── report            Job Summary に表示、artifact を保存
+    └── comment           pr_comment のときだけ PR にコメント（comment token）
 
-Consumer repository
-
-└── workflow_dispatch(pr_number)
-
-    └── Reusable Workflow @ full commit SHA
-
-        ├── prepare  PR検証、SHA固定、diff生成
-
-        ├── review   Claude Codeによるread-onlyレビュー
-
-        └── publish  結果検証、stale確認、PRコメント投稿
-
+レビュー対象 repository
+└── （workflow の追加は不要）
 ```
 
-- `prepare`はPRのhead・base・merge-baseを固定し、レビュー用bundleを生成する
+- Claude は PR の snapshot だけを根拠に、構造化された指摘を返す。
+- Codex は同じ snapshot と Claude の結果を受け取り、Claude の各指摘を次のいずれかに分類する。
+  - `adopted`: 採用
+  - `duplicate`: 重複
+  - `rejected`: 不採用（理由つき）
+  - `deferred`: 判断保留
+- さらに Codex は、Claude が見逃した問題を追加指摘し、情報不足を明示する。
+- Claude の結果は untrusted data として扱い、命令としては扱わない。
 
-- `reviewpermissions: {}`で実行し、GitHubへの書き込み権限を持たない
+## 出力モード
 
-- `publish`だけ`pull-requests: write`を持ち、Claudeのcredentialは受け取らない
+| モード | PR へのコメント | 必要な token |
+|---|---|---|
+| `summary_only`（既定） | しない。Job Summary と artifact に出す | read token のみ |
+| `pr_comment` | Job Summary に加えて PR にコメントする | read token と comment token |
 
-- Codexの二次レビューはActionsへ統合せず、GitHub上`@codex review`で独立して実行する
+不完全、stale、schema 不正、AI 失敗のいずれかの場合は、PR に投稿しない。Job Summary と artifact には、失敗した stage と理由が表示される。**指摘が 0 件であることと、実行が失敗したことは、区別して表示される。**
+
+最終結果では、次を識別できる。
+
+- Codex が採用した Claude の指摘
+- Codex が追加した指摘
+- 判断保留
+- 不採用となった Claude の指摘とその理由、重複と判定された指摘
+- Claude と Codex それぞれの実行状態
+- schema 検証、snapshot 検証、最終整形の状態
+- 要求したモデルと、実際に使われたモデル
+
+## 使い方
+
+### 1. Secret を登録する
+
+中央実行 repository の Actions Secret に、次の 4 つを登録する。値はここへ書かない。
+
+| Secret 名 | 用途 | 渡される job |
+|---|---|---|
+| `AI_REVIEW_READ_TOKEN` | 対象 repository の metadata・contents・pull requests の read | `prepare` だけ |
+| `AI_REVIEW_COMMENT_TOKEN` | 対象 repository の pull requests の write | `comment` だけ |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code の認証（`claude setup-token` で発行） | `claude_review` だけ |
+| `OPENAI_API_KEY` | OpenAI Responses API の認証 | `codex_review` だけ |
+
+`summary_only` だけを使う場合、`AI_REVIEW_COMMENT_TOKEN` は不要である。
+
+read token と comment token は、対象 repository に限定した fine-grained personal access token を別々に発行する。private repository を対象にする場合は、そのアクセスを付与する。組織の SSO が有効な場合は、SSO の認可も必要である。
+
+中央 repository の `GITHUB_TOKEN` は、別の repository にはアクセスできない。そのため、対象 repository へのアクセスには上記の token を使う。
+
+### 2. 実行する
+
+中央実行 repository の Actions から「AI Cross Review」を選び、次を指定して実行する。
+
+| 入力 | 説明 |
+|---|---|
+| `target_repository` | 対象 repository（`owner/name`） |
+| `pull_request` | PR 番号、または PR の URL |
+| `output_mode` | `summary_only`（既定）または `pr_comment` |
+| `claude_model` | 一次レビューのモデル（`claude-opus-5`、`claude-sonnet-5`） |
+| `codex_model` | 再検証のモデル（`gpt-5.6-sol`、`gpt-6-astra`、`gpt-5.6-terra`、`gpt-5.6-luna`） |
+| `claude_effort` / `codex_effort` | effort の水準（`low`、`medium`、`high`、`xhigh`、`max`） |
+| `policy_path` | 対象 repository のレビュー方針の path（既定は `.github/ai-review.md`） |
+
+モデル名は自由入力できない。許可されたモデルだけが、workflow の選択肢と実行時の検証の両方を通る。
+
+### 3. 結果を確認する
+
+- 実行の Job Summary に、最終結果が表示される。
+- 詳細な Markdown と JSON は、`ai-review-final-*` という名前の artifact に保存される（保持 7 日）。
+- `pr_comment` を選び、投稿できる状態のとき、対象 PR に定型のコメントが 1 件付く。同じ snapshot への再実行は、そのコメントを更新する。
+- 実行中に PR の head または base が変わった場合、結果は投稿されない。
+
+### 4. リポジトリ固有の方針を追加する（任意）
+
+対象 repository の default branch に `.github/ai-review.md` を置くと、レビュー観点として使われる。PR 側の同名ファイルは使われない。
+
+置かなかった場合は、この repository の `policies/default-review-policy.md` が使われ、結果に `policy_source: central_default` と記録される。壊れた方針（UTF-8 でない、空、上限超過）は、レビューを停止する。
 
 ## セキュリティ
 
-- AI Reviewは手動起動とし、通常CIから分離する
+- 手動起動だけで、入口は `workflow_dispatch` の 1 つである。`workflow_call` は提供しない。
+- PR のコード、workflow、hook、依存 script を checkout も実行もしない。
+- PR の title、本文、ファイル名、diff、Claude の結果を、命令としては扱わない。
+- AI に、対象 repository、PR 番号、投稿先、SHA、API endpoint、merge 判断を決めさせない。
+- AI の job は、対象 repository への credential を持たない。各 token が渡されるのは、上表の job だけである。
+- 投稿は、決定論的な publisher（`comment` job）だけが行う。
+- Claude の結果と Codex の結果は、prepare job が出力した snapshot の値と突合される。一致しない結果は、Codex の処理にも投稿にも使われない。
+- 認証情報らしき値は出力から除去され、`.env` や鍵などの path、バイナリの内容は AI に渡されない。
+- Claude Code CLI と外部 Action は、固定した version または full commit SHA で使う。Codex には tool を渡さず、応答を保存しない設定（`store: false`）で呼び出す。
 
-- PRのコード、workflow、hook、依存scriptをcheckout・実行しない
+### 運用上の注意
 
-- PR metadata、filename、documentation、diffをuntrusted dataとして扱う
-
-- AI出力をschema検証・無害化し、投稿先や対象SHAをAIに決定させない
-
-- 投稿前にPRがopenであり、head・base SHAが変わっていないことを再確認する
-
-- Claude Code CLI、installer、外部Actionを固定versionまたはfull SHAで使用する
-
-- credentialに該当するpathはdiffから除外し、binaryファイルは内容をAIへ渡さない
-
-防御をpromptだけに依存させず、権限分離、tool制限、入力上限、hash検証、出力無害化を組み合わせている。
-
-## 導入
-
-### 1. Secretを登録する
-
-Claude Code OAuth tokenを生成する。
-
-```bash
-
-claude setup-token
-
-```
-
-Consumer repositoryのActions Secretへ`CLAUDE_CODE_OAUTH_TOKEN`という名前で登録する。
-
-### 2. Wrapperを配置する
-
-`.github/workflows/ai-review.yml`](.github/workflows/ai-review.yml)をConsumer repositoryのdefault branchへコピーする。
-
-Reusable Workflowの参照先は、監査済みのfull commit SHAで固定する。branchやtagは使用せず`secrets: inherit`も指定しない。
-
-wrapperにはdefault branchとPR番号を検証する処理が含まれるため、単純なworkflowへ置き換えないこと。
-
-### 3. レビューを実行する
-
-GitHub Actionsの「AI Review」から対象PR番号を指定して実行する。
-
-手動workflowはdefault branchから実行する。レビュー結果は検証後、対象PRへ定型コメントとして投稿される。
-
-実行中にPRのheadまたはbaseが変わった場合、結果は投稿されない。
-
-### 4. Repository固有のルールを追加する
-
-必要に応じて、Consumer repositoryのdefault branch`.github/[ai-review.md](http://ai-review.md)`を配置する。
-
-このファイルはdefault branchの固定SHAから取得され、PR側の同名ファイルは使用されない。未配置の場合は共通policyだけでレビューする。
+- 対象の PR の diff と、レビュー結果は、中央実行 repository の Job Summary と artifact に残る。中央 repository は非公開にし、閲覧できる人を、対象 repository を閲覧できる人と同等以下に保つこと。
+- 対象 repository のコードは、Anthropic と OpenAI に送信される。対象組織の外部 AI 利用方針に従い、許可された repository だけを起動すること。
+- モデルの ID は公式ドキュメントの記載から転記しており、実 API での動作確認はまだ行っていない。初回の実行で、モデルが受理されない場合がある。その場合は失敗として表示される。
 
 ## 入力制限
 
-主な上限は次のとおり。
-
 - 変更ファイル数: 100
+- diff の合計: 200 KiB
+- 1 ファイルの diff: 50 KiB
+- review policy: 16 KiB
+- Claude の指摘: 20 件
+- 再検証の指摘: 20 件
+- Claude の実行時間: 600 秒、Codex の実行時間: 600 秒
 
-- diff合計: 200 KiB
-
-- 1ファイルのdiff: 50 KiB
-
-- findings: 20件
-
-- Claude実行時間: 600秒
-
-上限超過時は部分的なレビューを行わず、処理を停止する。
-
-詳細は`scripts/lib/[limits.py](http://limits.py)`](scripts/lib/[limits.py](http://limits.py))を参照。
+上限を超えた場合は、部分的なレビューを行わず、処理を停止する。詳細は `scripts/lib/limits.py` を参照。
 
 ## 開発
 
-Python
+Python 3.11 以上と標準ライブラリだけを使う。runtime の依存はない。
 
+```bash
+python3 -m unittest discover -s tests
+```
+
+テストでは、GitHub、Claude、OpenAI をすべて mock にしている。実際の Secret も、実際の PR も使わない。
+
+設計の背景は `docs/plan/` の Plan と、`docs/adr/` の ADR にある。作業ルールは `AGENTS.md` にまとまっている。

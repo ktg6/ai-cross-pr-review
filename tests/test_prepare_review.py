@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
+DEFAULT_POLICY_FILE = ROOT / "policies" / "default-review-policy.md"
 sys.path.insert(0, str(SCRIPTS))
 
 from lib import diff as diff_mod  # noqa: E402
@@ -191,6 +192,11 @@ class FakeGitHub:
         if policy is not None:
             self.routes[f"{base}/contents/.github/ai-review.md"] = (200, _content_payload(".github/ai-review.md", policy))
 
+    @property
+    def requested_paths(self) -> list[str]:
+        """Request paths with their query string, in call order."""
+        return [urllib.parse.urlsplit(url).path + "?" + urllib.parse.urlsplit(url).query for _m, url, _h in self.requests]
+
     def set_pull_sequence(self, *payloads: dict) -> None:
         self.pull_payloads = list(payloads)
 
@@ -236,7 +242,7 @@ def _runner_factory(recorder: RecordingRun | None = None):
     return factory
 
 
-def _run_prepare(tmp: Path, remote: LocalRemote, fake: FakeGitHub, *, token=None, limits=None, recorder=None, out_name="bundle", run_env=None):
+def _run_prepare(tmp: Path, remote: LocalRemote, fake: FakeGitHub, *, token=None, limits=None, recorder=None, out_name="bundle", run_env=None, default_policy_file=None):
     return prepare_review.prepare(
         repository=REPOSITORY,
         pr_number=PR_NUMBER,
@@ -247,6 +253,7 @@ def _run_prepare(tmp: Path, remote: LocalRemote, fake: FakeGitHub, *, token=None
         runner_factory=_runner_factory(recorder),
         remote_url=remote.url,
         limits=limits or limits_mod.DEFAULT_LIMITS,
+        default_policy_file=DEFAULT_POLICY_FILE if default_policy_file is None else default_policy_file,
         run_env=run_env if run_env is not None else {},
     )
 
@@ -497,11 +504,41 @@ class PrepareBundleTests(TempDirCase):
         for name in ("manifest.json", "files.json", "diff.patch", "policy.md", "pr-metadata.json"):
             self.assertEqual((self.tmp / "one" / name).read_bytes(), (self.tmp / "two" / name).read_bytes(), name)
 
-    def test_missing_policy_is_allowed(self):
-        manifest = _run_prepare(self.tmp, self.remote, FakeGitHub(self.shas, policy=None))
+    def test_missing_policy_falls_back_to_the_central_default(self):
+        github_output = self.tmp / "gh-output.txt"
+        manifest = _run_prepare(
+            self.tmp, self.remote, FakeGitHub(self.shas, policy=None),
+            run_env={"GITHUB_OUTPUT": str(github_output)},
+        )
         self.assertFalse(manifest["policy"]["present"])
-        self.assertFalse((self.tmp / "bundle" / "policy.md").exists())
-        self.assertIsNone(manifest["policy"]["blob_sha"])
+        self.assertEqual(manifest["policy"]["source"], "central_default")
+        # The fallback is bundled, so both models read the same policy text.
+        self.assertEqual((self.tmp / "bundle" / "policy.md").read_bytes(), DEFAULT_POLICY_FILE.read_bytes())
+        self.assertEqual(manifest["policy"]["bytes"], len(DEFAULT_POLICY_FILE.read_bytes()))
+        output = github_output.read_text()
+        self.assertIn("policy_source=central_default\n", output)
+        self.assertIn("policy_present=false\n", output)
+
+    def test_repository_policy_is_recorded_as_such(self):
+        github_output = self.tmp / "gh-output.txt"
+        manifest = _run_prepare(self.tmp, self.remote, FakeGitHub(self.shas), run_env={"GITHUB_OUTPUT": str(github_output)})
+        self.assertEqual(manifest["policy"]["source"], "repository")
+        self.assertTrue(manifest["policy"]["present"])
+        output = github_output.read_text()
+        self.assertIn("policy_source=repository\n", output)
+        self.assertIn("policy_present=true\n", output)
+
+    def test_policy_source_changes_the_snapshot_id(self):
+        repo = _run_prepare(self.tmp, self.remote, FakeGitHub(self.shas), out_name="repo")
+        fallback = _run_prepare(self.tmp, self.remote, FakeGitHub(self.shas, policy=None), out_name="fallback")
+        self.assertNotEqual(repo["snapshot_id"], fallback["snapshot_id"])
+
+    def test_is_fork_is_exported_for_the_workflow(self):
+        fake = FakeGitHub(self.shas)
+        fake.set_pull_sequence(_pull_payload(self.shas, head_repo="someone/widgets"))
+        github_output = self.tmp / "gh-output.txt"
+        _run_prepare(self.tmp, self.remote, fake, run_env={"GITHUB_OUTPUT": str(github_output)})
+        self.assertIn("is_fork=true\n", github_output.read_text())
 
     def test_fork_is_recorded(self):
         fake = FakeGitHub(self.shas)
@@ -597,6 +634,38 @@ class PrepareStopTests(TempDirCase):
     def test_policy_not_utf8(self):
         fake = FakeGitHub(self.shas, policy=b"\xff\xfe\x00bad")
         self._assert_stops(fake, prepare_review.PrepareError, message="UTF-8")
+
+    def test_policy_with_nul_bytes_stops(self):
+        fake = FakeGitHub(self.shas, policy=b"# rules\x00hidden\n")
+        self._assert_stops(fake, prepare_review.PrepareError, message="NUL")
+
+    def test_empty_policy_stops_instead_of_meaning_no_rules(self):
+        fake = FakeGitHub(self.shas, policy=b"  \n\n")
+        self._assert_stops(fake, prepare_review.PrepareError, message="empty")
+
+    def test_broken_central_default_policy_stops(self):
+        broken = self.tmp / "broken-default.md"
+        broken.write_bytes(b"\xff\xfe\x00bad")
+        with self.assertRaises(prepare_review.PrepareError):
+            _run_prepare(self.tmp, self.remote, FakeGitHub(self.shas, policy=None), default_policy_file=broken)
+        self.assertFalse((self.tmp / "bundle").exists())
+
+    def test_missing_central_default_policy_stops(self):
+        with self.assertRaises(prepare_review.PrepareError):
+            _run_prepare(
+                self.tmp, self.remote, FakeGitHub(self.shas, policy=None),
+                default_policy_file=self.tmp / "does-not-exist.md",
+            )
+
+    def test_pr_head_policy_is_never_used(self):
+        # The fake serves the policy only for the default branch's pinned SHA.
+        fake = FakeGitHub(self.shas, policy=b"# Policy on main\n")
+        _run_prepare(self.tmp, self.remote, fake)
+        requested = [path for path in fake.requested_paths if "/contents/" in path]
+        self.assertTrue(requested)
+        for path in requested:
+            self.assertIn("ref=" + self.shas["base_sha"], path)
+            self.assertNotIn(self.shas["head_sha"], path)
 
     def test_single_file_too_large(self):
         limits = dataclasses.replace(limits_mod.DEFAULT_LIMITS, max_file_diff_bytes=64)
