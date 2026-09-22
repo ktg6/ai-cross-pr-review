@@ -27,7 +27,7 @@ jobs:
           python-version-file: pyproject.toml
 
       - name: Validate workflow YAML
-        run: ruby -e 'require "yaml"; ARGV.each { |path| Psych.parse_file(path) }' .github/workflows/ai-review.yml .github/workflows/ci.yml .github/workflows/claude-review.yml
+        run: ruby -e 'require "yaml"; ARGV.each { |path| Psych.parse_file(path) }' .github/workflows/ci.yml .github/workflows/cross-review.yml actions/review-runtime/action.yml
 
       - name: Run tests
         run: python3 -m unittest discover -s tests

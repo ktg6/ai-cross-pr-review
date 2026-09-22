@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-0005
 
 ## Context
 
@@ -41,3 +41,4 @@ Accepted
 - `docs/plan/implementation-plan.md` 3章、4章、11章、12章、14章
 - `.github/workflows/claude-review.yml`、`actions/review-runtime/action.yml`
 - ADR-0002（trust boundaries）
+- ADR-0005（後継。[0005-central-execution-two-stage-review.md](0005-central-execution-two-stage-review.md)）

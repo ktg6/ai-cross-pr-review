@@ -1,64 +1,156 @@
 name: AI Review Runtime
 description: >-
-  Reusable Workflow（claude-review.yml）内部専用のcomposite action。
-  calleeと同一commitのscripts/を実行する。consumer repositoryから直接使用しない。
+  中央実行workflow（cross-review.yml）内部専用のcomposite action。
+  同一commitのscripts/を実行する。対象repositoryから直接使用しない。
 
 inputs:
   step:
-    description: 実行するstep。prepare、review、publishに対応する。
+    description: 実行するstep。validate、prepare、review、codex、finalize、report、publishに対応する。
     required: true
-  pr_number:
-    description: 対象PR番号（正の整数）。prepareとpublish stepで使用する。
-    required: false
-    default: ""
   repository:
-    description: base repository（owner/name）。prepareとpublish stepで使用する。
-    required: false
-    default: ${{ github.repository }}
-  github_token:
-    description: >-
-      GITHUB_TOKEN。prepare（read）とpublish（pull-requests: write）のsubprocess環境変数としてのみ渡す。
-      review stepへは渡さない。
+    description: 対象repository（owner/name）。AIではなくoperatorが決める。
     required: false
     default: ""
-  output_dir:
-    description: prepareはbundle、reviewは正規化済み結果の出力先。空または未存在のディレクトリであること。
+  pull_request:
+    description: 対象PR番号またはPR URL。validate stepでのみ使用する。
     required: false
-    default: ${{ runner.temp }}/ai-review-bundle
+    default: ""
+  pr_number:
+    description: 検証済みのPR番号。prepareとpublish stepで使用する。
+    required: false
+    default: ""
+  output_mode:
+    description: summary_only または pr_comment。
+    required: false
+    default: summary_only
+  claude_model:
+    description: 一次レビューに使用するmodel。allowlistで検証する。
+    required: false
+    default: claude-opus-5
+  codex_model:
+    description: 再検証に使用するmodel。allowlistで検証する。
+    required: false
+    default: gpt-5.6-sol
+  claude_effort:
+    description: 一次レビューのeffort level。
+    required: false
+    default: high
+  codex_effort:
+    description: 再検証のreasoning effort level。
+    required: false
+    default: high
   policy_path:
-    description: default branch上のrepository review policyのpath。prepare stepでのみ使用する。
+    description: 対象repositoryのdefault branch上にあるreview policyのpath。
     required: false
     default: .github/ai-review.md
-  bundle_dir:
-    description: review stepが読み込むbundleのディレクトリ。
-    required: false
-    default: ""
-  result_file:
-    description: publish stepが読み込む正規化済み結果（review-result.json）のpath。
-    required: false
-    default: ""
-  expected_snapshot_id:
+  github_token:
     description: >-
-      prepare jobが出力したsnapshot_id。publish stepはartifactの値と一致しない結果を投稿しない。
+      対象repositoryへのtoken。prepare（read権限）とpublish（pull requests write）の
+      subprocess環境変数としてのみ渡す。AI stepへは渡さない。
     required: false
     default: ""
   claude_code_oauth_token:
     description: Claude Code OAuth token。review stepのClaude実行stepにだけ渡す。
     required: false
     default: ""
-  model:
-    description: レビューに使用するmodel。AIではなくoperatorが決める。
+  openai_api_key:
+    description: OpenAI API key。codex stepのCodex実行stepにだけ渡す。
     required: false
-    default: claude-opus-5
-  effort:
-    description: レビューのeffort level（low / medium / high / xhigh / max）。
+    default: ""
+  output_dir:
+    description: 各stepの出力先。空または未存在のディレクトリであること。
     required: false
-    default: high
+    default: ${{ runner.temp }}/ai-review-output
+  bundle_dir:
+    description: reviewとcodex stepが読み込むbundleのディレクトリ。
+    required: false
+    default: ""
+  claude_result_file:
+    description: 正規化済みの一次レビュー結果のpath。
+    required: false
+    default: ""
+  codex_result_file:
+    description: 正規化済みの再検証結果のpath。
+    required: false
+    default: ""
+  result_file:
+    description: finalizeが生成した最終結果（final-review.json）のpath。
+    required: false
+    default: ""
+  expected_snapshot_id:
+    description: >-
+      prepare jobが出力したsnapshot_id。finalizeとpublishは、この値と一致しない結果を使用しない。
+    required: false
+    default: ""
+  head_sha:
+    description: prepare jobが出力したhead SHA。finalizeが各stage結果との一致を検証する。
+    required: false
+    default: ""
+  base_sha:
+    description: prepare jobが出力したbase SHA。
+    required: false
+    default: ""
+  merge_base_sha:
+    description: prepare jobが出力したmerge-base SHA。
+    required: false
+    default: ""
+  diff_sha256:
+    description: prepare jobが出力したdiffのSHA-256。
+    required: false
+    default: ""
+  policy_source:
+    description: prepare jobが出力したpolicyの出所（repository / central_default）。
+    required: false
+    default: ""
+  policy_present:
+    description: prepare jobが出力した、対象repositoryにpolicyが存在したか（true / false）。
+    required: false
+    default: ""
+  is_fork:
+    description: prepare jobが出力した、PRがforkからのものか（true / false）。
+    required: false
+    default: ""
+  claude_job_result:
+    description: claude_review jobの実行結果（needs.<job>.result）。
+    required: false
+    default: failure
+  codex_job_result:
+    description: codex_review jobの実行結果（needs.<job>.result）。
+    required: false
+    default: failure
+  api_url:
+    description: GitHub API endpoint。AIには決定させない。
+    required: false
+    default: ${{ github.api_url }}
 
 outputs:
+  repository:
+    description: 検証済みの対象repository。
+    value: ${{ steps.validate.outputs.repository }}
+  pr_number:
+    description: 検証済みのPR番号。
+    value: ${{ steps.validate.outputs.pr_number }}
+  output_mode:
+    description: 検証済みの出力モード。
+    value: ${{ steps.validate.outputs.output_mode || steps.finalize.outputs.output_mode }}
+  claude_model:
+    description: 検証済みの一次レビューmodel。
+    value: ${{ steps.validate.outputs.claude_model }}
+  codex_model:
+    description: 検証済みの再検証model。
+    value: ${{ steps.validate.outputs.codex_model }}
+  claude_effort:
+    description: 検証済みの一次レビューeffort。
+    value: ${{ steps.validate.outputs.claude_effort }}
+  codex_effort:
+    description: 検証済みの再検証effort。
+    value: ${{ steps.validate.outputs.codex_effort }}
+  policy_path:
+    description: 検証済みのpolicy path。
+    value: ${{ steps.validate.outputs.policy_path }}
   head_sha:
     description: 固定したPR head SHA。
-    value: ${{ steps.prepare.outputs.head_sha || steps.publish.outputs.head_sha }}
+    value: ${{ steps.prepare.outputs.head_sha || steps.finalize.outputs.head_sha }}
   base_sha:
     description: 固定したbase SHA。
     value: ${{ steps.prepare.outputs.base_sha }}
@@ -68,15 +160,30 @@ outputs:
   policy_sha:
     description: policy取得元のdefault branch commit SHA。
     value: ${{ steps.prepare.outputs.policy_sha }}
+  policy_source:
+    description: 使用したpolicyの出所（repository / central_default）。
+    value: ${{ steps.prepare.outputs.policy_source }}
+  policy_present:
+    description: 対象repositoryにpolicyが存在したか。
+    value: ${{ steps.prepare.outputs.policy_present }}
   diff_sha256:
     description: diff.patchのSHA-256。
     value: ${{ steps.prepare.outputs.diff_sha256 }}
+  is_fork:
+    description: PRがforkからのものか（true / false）。
+    value: ${{ steps.prepare.outputs.is_fork }}
   snapshot_id:
-    description: snapshot全体を表すID（publisher markerに使用）。
-    value: ${{ steps.prepare.outputs.snapshot_id || steps.publish.outputs.snapshot_id }}
-  bundle_dir:
-    description: 生成したbundleのディレクトリ。
-    value: ${{ steps.prepare.outputs.bundle_dir }}
+    description: snapshot全体を表すID。
+    value: ${{ steps.prepare.outputs.snapshot_id || steps.finalize.outputs.snapshot_id }}
+  publishable:
+    description: 最終結果を投稿してよいか。
+    value: ${{ steps.finalize.outputs.publishable }}
+  claude_status:
+    description: 一次レビューstageの状態。
+    value: ${{ steps.finalize.outputs.claude_status }}
+  codex_status:
+    description: 再検証stageの状態。
+    value: ${{ steps.finalize.outputs.codex_status }}
   comment_id:
     description: publish stepが作成・更新したPRコメントのID。
     value: ${{ steps.publish.outputs.comment_id }}
@@ -94,9 +201,36 @@ runs:
         AI_REVIEW_STEP: ${{ inputs.step }}
       run: |
         case "$AI_REVIEW_STEP" in
-          prepare|review|publish) ;;
+          validate|prepare|review|codex|finalize|report|publish) ;;
           *) echo "::error::unsupported step: $AI_REVIEW_STEP" ; exit 2 ;;
         esac
+
+    # 入力allowlistの唯一の入口。後続jobはこのstepの出力だけを使う。
+    - name: Validate request
+      id: validate
+      if: ${{ inputs.step == 'validate' }}
+      shell: bash
+      env:
+        AI_REVIEW_REPOSITORY: ${{ inputs.repository }}
+        AI_REVIEW_PULL_REQUEST: ${{ inputs.pull_request }}
+        AI_REVIEW_OUTPUT_MODE: ${{ inputs.output_mode }}
+        AI_REVIEW_CLAUDE_MODEL: ${{ inputs.claude_model }}
+        AI_REVIEW_CODEX_MODEL: ${{ inputs.codex_model }}
+        AI_REVIEW_CLAUDE_EFFORT: ${{ inputs.claude_effort }}
+        AI_REVIEW_CODEX_EFFORT: ${{ inputs.codex_effort }}
+        AI_REVIEW_POLICY_PATH: ${{ inputs.policy_path }}
+        AI_REVIEW_SERVER_URL: ${{ github.server_url }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../../scripts/validate-request.py" \
+          --repository "$AI_REVIEW_REPOSITORY" \
+          --pull-request "$AI_REVIEW_PULL_REQUEST" \
+          --output-mode "$AI_REVIEW_OUTPUT_MODE" \
+          --claude-model "$AI_REVIEW_CLAUDE_MODEL" \
+          --codex-model "$AI_REVIEW_CODEX_MODEL" \
+          --claude-effort "$AI_REVIEW_CLAUDE_EFFORT" \
+          --codex-effort "$AI_REVIEW_CODEX_EFFORT" \
+          --policy-path "$AI_REVIEW_POLICY_PATH" \
+          --server-url "$AI_REVIEW_SERVER_URL"
 
     - name: Prepare review bundle
       id: prepare
@@ -108,7 +242,7 @@ runs:
         AI_REVIEW_REPOSITORY: ${{ inputs.repository }}
         AI_REVIEW_OUTPUT_DIR: ${{ inputs.output_dir }}
         AI_REVIEW_POLICY_PATH: ${{ inputs.policy_path }}
-        AI_REVIEW_API_URL: ${{ github.api_url }}
+        AI_REVIEW_API_URL: ${{ inputs.api_url }}
         AI_REVIEW_SERVER_URL: ${{ github.server_url }}
         AI_REVIEW_WORKDIR: ${{ runner.temp }}/ai-review-git
       run: |
@@ -119,7 +253,8 @@ runs:
           --workdir "$AI_REVIEW_WORKDIR" \
           --api-url "$AI_REVIEW_API_URL" \
           --server-url "$AI_REVIEW_SERVER_URL" \
-          --policy-path "$AI_REVIEW_POLICY_PATH"
+          --policy-path "$AI_REVIEW_POLICY_PATH" \
+          --default-policy-file "$GITHUB_ACTION_PATH/../../policies/default-review-policy.md"
 
     # 固定versionのClaude Code CLIを導入する。installer自体もSHA-256を固定し、
     # 不一致なら実行しない。導入後のbinaryはrun-review.pyでもrelease digestを検証する。
@@ -138,7 +273,7 @@ runs:
         bash "$AI_REVIEW_INSTALLER" "$AI_REVIEW_CLAUDE_VERSION"
         rm -f "$AI_REVIEW_INSTALLER"
 
-    - name: Run read-only review
+    - name: Run read-only primary review
       id: review
       if: ${{ inputs.step == 'review' }}
       shell: bash
@@ -147,8 +282,8 @@ runs:
         AI_REVIEW_BUNDLE_DIR: ${{ inputs.bundle_dir }}
         AI_REVIEW_OUTPUT_DIR: ${{ inputs.output_dir }}
         AI_REVIEW_WORKDIR: ${{ runner.temp }}/ai-review-claude
-        AI_REVIEW_MODEL: ${{ inputs.model }}
-        AI_REVIEW_EFFORT: ${{ inputs.effort }}
+        AI_REVIEW_MODEL: ${{ inputs.claude_model }}
+        AI_REVIEW_EFFORT: ${{ inputs.claude_effort }}
         DISABLE_AUTOUPDATER: "1"
       run: |
         set -euo pipefail
@@ -168,10 +303,102 @@ runs:
           --invocation-file "$AI_REVIEW_WORKDIR/claude-invocation.json" \
           --output-dir "$AI_REVIEW_OUTPUT_DIR"
 
-    # raw envelopeとpromptはjob間へ渡さない。artifact化されるのは正規化済み結果だけ。
-    # runnerはephemeralであり、明示的なrecursive deleteは行わない。
+    # 再検証stage。実行手段を持たないResponses API呼び出しだけを行う。
+    # GitHub tokenは渡さない。一次レビュー結果はuntrusted dataとして扱う。
+    - name: Run verification review
+      id: codex
+      if: ${{ inputs.step == 'codex' }}
+      shell: bash
+      env:
+        OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        AI_REVIEW_BUNDLE_DIR: ${{ inputs.bundle_dir }}
+        AI_REVIEW_CLAUDE_RESULT: ${{ inputs.claude_result_file }}
+        AI_REVIEW_OUTPUT_DIR: ${{ inputs.output_dir }}
+        AI_REVIEW_WORKDIR: ${{ runner.temp }}/ai-review-codex
+        AI_REVIEW_MODEL: ${{ inputs.codex_model }}
+        AI_REVIEW_EFFORT: ${{ inputs.codex_effort }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$AI_REVIEW_WORKDIR"
+        python3 "$GITHUB_ACTION_PATH/../../scripts/run-codex-review.py" \
+          --bundle-dir "$AI_REVIEW_BUNDLE_DIR" \
+          --claude-result-file "$AI_REVIEW_CLAUDE_RESULT" \
+          --workdir "$AI_REVIEW_WORKDIR" \
+          --prompt-file "$GITHUB_ACTION_PATH/../../prompts/codex-verify.md" \
+          --schema-file "$GITHUB_ACTION_PATH/../../schemas/codex-review.schema.json" \
+          --model "$AI_REVIEW_MODEL" \
+          --effort "$AI_REVIEW_EFFORT"
+        python3 "$GITHUB_ACTION_PATH/../../scripts/normalize-codex-review.py" \
+          --bundle-dir "$AI_REVIEW_BUNDLE_DIR" \
+          --claude-result-file "$AI_REVIEW_CLAUDE_RESULT" \
+          --raw-file "$AI_REVIEW_WORKDIR/codex-raw.json" \
+          --invocation-file "$AI_REVIEW_WORKDIR/codex-invocation.json" \
+          --output-dir "$AI_REVIEW_OUTPUT_DIR"
 
-    # publish stepはClaude Secretを受け取らない。投稿先はworkflow contextとprepareの
+    # raw envelopeとpromptはjob間へ渡さない。artifact化されるのは正規化済み結果と
+    # 最終結果だけ。runnerはephemeralであり、明示的なrecursive deleteは行わない。
+
+    - name: Finalize review
+      id: finalize
+      if: ${{ inputs.step == 'finalize' }}
+      shell: bash
+      env:
+        AI_REVIEW_REPOSITORY: ${{ inputs.repository }}
+        AI_REVIEW_PR_NUMBER: ${{ inputs.pr_number }}
+        AI_REVIEW_OUTPUT_MODE: ${{ inputs.output_mode }}
+        AI_REVIEW_CLAUDE_MODEL: ${{ inputs.claude_model }}
+        AI_REVIEW_CODEX_MODEL: ${{ inputs.codex_model }}
+        AI_REVIEW_CLAUDE_EFFORT: ${{ inputs.claude_effort }}
+        AI_REVIEW_CODEX_EFFORT: ${{ inputs.codex_effort }}
+        AI_REVIEW_POLICY_PATH: ${{ inputs.policy_path }}
+        AI_REVIEW_SNAPSHOT_ID: ${{ inputs.expected_snapshot_id }}
+        AI_REVIEW_HEAD_SHA: ${{ inputs.head_sha }}
+        AI_REVIEW_BASE_SHA: ${{ inputs.base_sha }}
+        AI_REVIEW_MERGE_BASE_SHA: ${{ inputs.merge_base_sha }}
+        AI_REVIEW_DIFF_SHA256: ${{ inputs.diff_sha256 }}
+        AI_REVIEW_POLICY_SOURCE: ${{ inputs.policy_source }}
+        AI_REVIEW_POLICY_PRESENT: ${{ inputs.policy_present }}
+        AI_REVIEW_IS_FORK: ${{ inputs.is_fork }}
+        AI_REVIEW_CLAUDE_RESULT: ${{ inputs.claude_result_file }}
+        AI_REVIEW_CODEX_RESULT: ${{ inputs.codex_result_file }}
+        AI_REVIEW_CLAUDE_JOB_RESULT: ${{ inputs.claude_job_result }}
+        AI_REVIEW_CODEX_JOB_RESULT: ${{ inputs.codex_job_result }}
+        AI_REVIEW_OUTPUT_DIR: ${{ inputs.output_dir }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../../scripts/finalize-review.py" \
+          --repository "$AI_REVIEW_REPOSITORY" \
+          --pr-number "$AI_REVIEW_PR_NUMBER" \
+          --output-mode "$AI_REVIEW_OUTPUT_MODE" \
+          --claude-model "$AI_REVIEW_CLAUDE_MODEL" \
+          --codex-model "$AI_REVIEW_CODEX_MODEL" \
+          --claude-effort "$AI_REVIEW_CLAUDE_EFFORT" \
+          --codex-effort "$AI_REVIEW_CODEX_EFFORT" \
+          --policy-path "$AI_REVIEW_POLICY_PATH" \
+          --expected-snapshot-id "$AI_REVIEW_SNAPSHOT_ID" \
+          --head-sha "$AI_REVIEW_HEAD_SHA" \
+          --base-sha "$AI_REVIEW_BASE_SHA" \
+          --merge-base-sha "$AI_REVIEW_MERGE_BASE_SHA" \
+          --diff-sha256 "$AI_REVIEW_DIFF_SHA256" \
+          --policy-source "$AI_REVIEW_POLICY_SOURCE" \
+          --policy-present "$AI_REVIEW_POLICY_PRESENT" \
+          --is-fork "$AI_REVIEW_IS_FORK" \
+          --claude-result-file "$AI_REVIEW_CLAUDE_RESULT" \
+          --codex-result-file "$AI_REVIEW_CODEX_RESULT" \
+          --claude-job-result "$AI_REVIEW_CLAUDE_JOB_RESULT" \
+          --codex-job-result "$AI_REVIEW_CODEX_JOB_RESULT" \
+          --output-dir "$AI_REVIEW_OUTPUT_DIR"
+
+    - name: Report to job summary
+      id: report
+      if: ${{ inputs.step == 'report' }}
+      shell: bash
+      env:
+        AI_REVIEW_RESULT_FILE: ${{ inputs.result_file }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../../scripts/report-summary.py" \
+          --result-file "$AI_REVIEW_RESULT_FILE"
+
+    # publish stepはAI providerのSecretを受け取らない。投稿先はvalidate/prepareの
     # 出力だけで決まり、AI結果からは決まらない。
     - name: Publish review comment
       id: publish
@@ -183,11 +410,13 @@ runs:
         AI_REVIEW_REPOSITORY: ${{ inputs.repository }}
         AI_REVIEW_RESULT_FILE: ${{ inputs.result_file }}
         AI_REVIEW_SNAPSHOT_ID: ${{ inputs.expected_snapshot_id }}
-        AI_REVIEW_API_URL: ${{ github.api_url }}
+        AI_REVIEW_OUTPUT_MODE: ${{ inputs.output_mode }}
+        AI_REVIEW_API_URL: ${{ inputs.api_url }}
       run: |
         python3 "$GITHUB_ACTION_PATH/../../scripts/publish-review.py" \
           --repository "$AI_REVIEW_REPOSITORY" \
           --pr-number "$AI_REVIEW_PR_NUMBER" \
           --result-file "$AI_REVIEW_RESULT_FILE" \
           --expected-snapshot-id "$AI_REVIEW_SNAPSHOT_ID" \
+          --output-mode "$AI_REVIEW_OUTPUT_MODE" \
           --api-url "$AI_REVIEW_API_URL"

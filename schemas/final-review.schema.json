@@ -1,0 +1,120 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/ktg6/ai-cross-pr-review/schemas/final-review.schema.json",
+  "title": "AI cross-review final result (deterministic output)",
+  "description": "finalize-review.pyが決定論的に生成する最終結果。モデル出力ではない。reportとpublisherはこの文書だけを読む。stagesとverificationは常に存在し、失敗はfindings 0件の成功へ変換されない。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["final_schema_version", "framework_version", "request", "snapshot", "stages", "verification", "review", "publishable"],
+  "definitions": {
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "model_requested", "model_reported", "detail"],
+      "properties": {
+        "status": {"type": "string", "enum": ["success", "failed", "skipped", "missing", "invalid"]},
+        "model_requested": {"type": ["string", "null"]},
+        "model_reported": {"type": ["string", "null"]},
+        "detail": {"type": ["string", "null"], "description": "失敗理由の短い説明。値やsecretを含めない。"}
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "claude_index", "title", "detail", "severity", "confidence", "category", "path", "line", "rationale", "suggested_fix", "duplicate_of"],
+      "properties": {
+        "origin": {"type": "string", "enum": ["claude", "codex"]},
+        "claude_index": {"type": ["integer", "null"]},
+        "title": {"type": "string"},
+        "detail": {"type": "string"},
+        "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "category": {"type": "string", "enum": ["correctness", "security", "reliability", "maintainability", "testing", "other"]},
+        "path": {"type": "string"},
+        "line": {"type": ["integer", "null"]},
+        "rationale": {"type": ["string", "null"]},
+        "suggested_fix": {"type": ["string", "null"]},
+        "duplicate_of": {"type": ["integer", "null"]}
+      }
+    }
+  },
+  "properties": {
+    "final_schema_version": {"type": "string", "enum": ["1"]},
+    "framework_version": {"type": "string"},
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "pr_number", "output_mode", "claude_model_requested", "codex_model_requested", "claude_effort", "codex_effort", "policy_path"],
+      "properties": {
+        "repository": {"type": "string"},
+        "pr_number": {"type": "integer"},
+        "output_mode": {"type": "string", "enum": ["summary_only", "pr_comment"]},
+        "claude_model_requested": {"type": "string"},
+        "codex_model_requested": {"type": "string"},
+        "claude_effort": {"type": "string"},
+        "codex_effort": {"type": "string"},
+        "policy_path": {"type": "string"}
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "pr_number", "base_sha", "head_sha", "merge_base_sha", "diff_sha256", "policy_commit_sha", "policy_blob_sha", "policy_source", "policy_present", "is_fork", "snapshot_id", "reviewable_path_hashes"],
+      "properties": {
+        "repository": {"type": "string"},
+        "pr_number": {"type": "integer"},
+        "base_sha": {"type": "string"},
+        "head_sha": {"type": "string"},
+        "merge_base_sha": {"type": "string"},
+        "diff_sha256": {"type": "string"},
+        "policy_commit_sha": {"type": ["string", "null"]},
+        "policy_blob_sha": {"type": ["string", "null"]},
+        "policy_source": {"type": "string", "enum": ["repository", "central_default"]},
+        "policy_present": {"type": "boolean"},
+        "is_fork": {"type": "boolean"},
+        "snapshot_id": {"type": "string"},
+        "reviewable_path_hashes": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "stages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claude", "codex"],
+      "properties": {
+        "claude": {"$ref": "#/definitions/stage"},
+        "codex": {"$ref": "#/definitions/stage"}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_valid", "snapshot_match", "claude_fingerprint_match", "codex_fingerprint_match", "reference_consistency", "finalized"],
+      "properties": {
+        "schema_valid": {"type": "boolean"},
+        "snapshot_match": {"type": "boolean"},
+        "claude_fingerprint_match": {"type": "boolean"},
+        "codex_fingerprint_match": {"type": "boolean"},
+        "reference_consistency": {"type": "boolean"},
+        "finalized": {"type": "boolean"}
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "adopted", "added", "deferred", "rejected", "duplicates", "insufficient_context", "limitations", "dropped", "redactions"],
+      "properties": {
+        "summary": {"type": "string"},
+        "adopted": {"type": "array", "items": {"$ref": "#/definitions/entry"}},
+        "added": {"type": "array", "items": {"$ref": "#/definitions/entry"}},
+        "deferred": {"type": "array", "items": {"$ref": "#/definitions/entry"}},
+        "rejected": {"type": "array", "items": {"$ref": "#/definitions/entry"}},
+        "duplicates": {"type": "array", "items": {"$ref": "#/definitions/entry"}},
+        "insufficient_context": {"type": "array", "items": {"type": "string"}},
+        "limitations": {"type": "array", "items": {"type": "string"}},
+        "dropped": {"type": "integer"},
+        "redactions": {"type": "integer"}
+      }
+    },
+    "publishable": {"type": "boolean"}
+  }
+}

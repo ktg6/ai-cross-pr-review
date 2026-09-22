@@ -18,7 +18,6 @@ import argparse
 import json
 import os
 import platform
-import re
 import secrets
 import subprocess
 import sys
@@ -29,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from lib import bundle as bundle_mod  # noqa: E402
 from lib import limits as limits_mod  # noqa: E402
+from lib import models as models_mod  # noqa: E402
 
 EXIT_OK = 0
 EXIT_UNEXPECTED = 1
@@ -38,9 +38,9 @@ TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 RAW_RESULT_NAME = "claude-raw.json"
 INVOCATION_NAME = "claude-invocation.json"
 
-DEFAULT_MODEL = "claude-opus-5"
-DEFAULT_EFFORT = "high"
-ALLOWED_EFFORT = ("low", "medium", "high", "xhigh", "max")
+# Model and effort come from the validated request, never from a model or a PR.
+DEFAULT_MODEL = models_mod.DEFAULT_CLAUDE_MODEL
+DEFAULT_EFFORT = models_mod.DEFAULT_CLAUDE_EFFORT
 
 # The only free-text instruction passed on argv. The contract itself lives in
 # prompts/review.md, which is loaded as the system prompt from the same commit.
@@ -51,10 +51,6 @@ FIXED_INSTRUCTION = (
 )
 
 _ARCHES = {"x86_64": "x64", "amd64": "x64", "arm64": "arm64", "aarch64": "arm64"}
-
-# Model names come from the workflow input, never from the model or the PR.
-# The pattern keeps a stray value from being parsed as another CLI flag.
-_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:-]{0,63}")
 
 
 class ReviewError(Exception):
@@ -158,7 +154,7 @@ def build_untrusted_document(b: bundle_mod.Bundle, nonce: str) -> str:
     """Wrap the bundle in boundary markers the PR author cannot predict."""
     begin = f"BEGIN UNTRUSTED REVIEW BUNDLE {nonce}"
     end = f"END UNTRUSTED REVIEW BUNDLE {nonce}"
-    policy = b.policy.decode("utf-8", "replace") if b.policy is not None else "(no repository review rules configured)"
+    policy = b.policy.decode("utf-8", "replace")
     files = [
         {
             "path": entry.path,
@@ -171,7 +167,7 @@ def build_untrusted_document(b: bundle_mod.Bundle, nonce: str) -> str:
     ]
     sections = [
         begin,
-        "## POLICY (from the default branch of the reviewed repository)",
+        f"## POLICY (source: {b.policy_source})",
         policy,
         "## PR_METADATA (untrusted)",
         json.dumps(b.pr_metadata, ensure_ascii=False, indent=2, sort_keys=True),
@@ -265,10 +261,10 @@ def run_review(
     run_env: dict | None = None,
 ) -> dict:
     run_env = os.environ if run_env is None else run_env
-    if effort not in ALLOWED_EFFORT:
-        raise ReviewError("unsupported effort level")
-    if not isinstance(model, str) or not _MODEL_RE.fullmatch(model):
-        raise ReviewError("unsupported model name")
+    # The allowlist is the authority: a workflow ``choice`` only guards one
+    # entry point, and a value that is not on the list must never reach argv.
+    model = models_mod.validate_claude_model(model)
+    effort = models_mod.validate_claude_effort(effort)
     if not token:
         raise ReviewError(f"{TOKEN_ENV} is not set")
 
@@ -380,7 +376,12 @@ def main(argv: list[str] | None = None) -> int:
             effort=args.effort,
             token=os.environ.get(TOKEN_ENV) or None,
         )
-    except (ReviewError, bundle_mod.BundleError, limits_mod.LimitExceeded) as err:
+    except (
+        ReviewError,
+        bundle_mod.BundleError,
+        limits_mod.LimitExceeded,
+        models_mod.ModelNotAllowed,
+    ) as err:
         log(f"stop: {err}")
         return EXIT_STOP
     except Exception as err:  # noqa: BLE001 - last-resort guard, message only

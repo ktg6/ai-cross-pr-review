@@ -262,6 +262,9 @@ def normalize(
             "diff_sha256": manifest["diff"]["sha256"],
             "policy_commit_sha": policy.get("commit_sha"),
             "policy_blob_sha": policy.get("blob_sha"),
+            "policy_source": policy.get("source"),
+            "policy_present": bool(policy.get("present")),
+            "is_fork": bool(manifest.get("is_fork")),
             "snapshot_id": b.snapshot_id,
             # Keep paths out of the result while giving the publisher enough
             # information to reject a finding outside the reviewed diff.

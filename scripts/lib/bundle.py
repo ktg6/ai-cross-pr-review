@@ -92,11 +92,26 @@ class Bundle:
     pr_metadata: dict
     files: list[ChangedFileEntry]
     diff: bytes
-    policy: bytes | None
+    # Always present: either the target repository's policy or the central
+    # default. ``policy_source`` says which one.
+    policy: bytes
 
     @property
     def snapshot_id(self) -> str:
         return str(self.manifest["snapshot_id"])
+
+    @property
+    def _policy_info(self) -> dict:
+        info = self.manifest.get("policy")
+        return info if isinstance(info, dict) else {}
+
+    @property
+    def policy_source(self) -> str:
+        return str(self._policy_info.get("source", ""))
+
+    @property
+    def policy_present(self) -> bool:
+        return bool(self._policy_info.get("present"))
 
     def file_index(self) -> dict[str, ChangedFileEntry]:
         return {entry.path: entry for entry in self.files}
@@ -185,10 +200,14 @@ def load_bundle(directory: Path, limits: limits_mod.Limits = limits_mod.DEFAULT_
     diff = (directory / "diff.patch").read_bytes()
     limits_mod.check_limit("bundle diff size", len(diff), limits.max_diff_total_bytes)
 
-    policy: bytes | None = None
     policy_info = manifest["policy"]
-    if isinstance(policy_info, dict) and policy_info.get("present"):
-        policy = (directory / "policy.md").read_bytes()
-        limits_mod.check_limit("bundle policy size", len(policy), limits.max_policy_bytes)
+    if not isinstance(policy_info, dict):
+        raise BundleError("manifest.json has no policy block")
+    if policy_info.get("source") not in limits_mod.POLICY_SOURCES:
+        raise BundleError("manifest.json has an unknown policy source")
+    policy = (directory / "policy.md").read_bytes()
+    limits_mod.check_limit("bundle policy size", len(policy), limits.max_policy_bytes)
+    if not policy.strip():
+        raise BundleError("bundle policy is empty")
 
     return Bundle(directory=directory, manifest=manifest, pr_metadata=pr_metadata, files=files, diff=diff, policy=policy)

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-0008
 
 ## Context
 
@@ -42,3 +42,4 @@ OAuth tokenは追加のConsole設定なしにpilotを開始でき、認証をste
 - Claude Code authentication docs（code.claude.com/docs/en/authentication）「Generate a long-lived token」
 - Claude Code GitHub Actions docs（code.claude.com/docs/en/github-actions）
 - ADR-0002
+- ADR-0008（後継。[0008-cross-repository-authentication.md](0008-cross-repository-authentication.md)）
