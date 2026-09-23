@@ -123,6 +123,12 @@ jobs:
           claude_effort: ${{ inputs.claude_effort }}
           codex_effort: ${{ inputs.codex_effort }}
           policy_path: ${{ inputs.policy_path }}
+          # credential期限はSecretではなくrepository variableで管理する（ADR-0010）。
+          # 未設定なら空文字になり、期限監視の対象外としてSummaryに表示される。
+          read_token_expires_on: ${{ vars.AI_REVIEW_READ_TOKEN_EXPIRES_ON }}
+          comment_token_expires_on: ${{ vars.AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON }}
+          claude_token_expires_on: ${{ vars.AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON }}
+          openai_key_expires_on: ${{ vars.AI_REVIEW_OPENAI_KEY_EXPIRES_ON }}
 
   prepare:
     name: Prepare review bundle

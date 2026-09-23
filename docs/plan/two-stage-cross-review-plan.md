@@ -229,9 +229,20 @@ Phase 7で実装する際の前提は次のとおり。
 - **Tests**: 後述6章。
 - **Completion criteria**: `python3 -m unittest discover -s tests`が成功し、6章の境界がすべてmockで検証されている。
 
-### Phase 6：運用整備（本Plan外、将来）
+### Phase 6：運用整備
 
-- model allowlistのライフサイクル運用、GitHub App移行、rotation自動通知、費用上限の運用値調整。
+- **Goal**: 失敗がfail closedになる性質を維持したまま、「失敗してから気付く」運用課題を警告と記録で先回りする。レビューの成否とtrust boundaryは変えない。
+- **実装するもの**:
+  - model allowlistのライフサイクル: `scripts/lib/models.py`の各IDに公式docsでの確認日と確認元を持たせる。選択modelの確認日が未記録、または90日を超えた場合にJob Summaryとannotationで警告する。確認日が不明なIDは推測で埋めない。
+  - credential期限の警告: 期限日をrepository variable（`AI_REVIEW_READ_TOKEN_EXPIRES_ON`、`AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON`、`AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON`、`AI_REVIEW_OPENAI_KEY_EXPIRES_ON`）で受け取る。`validate_request` job内の運用チェック（`scripts/check-operations.py`）が、期限切れと30日以内の期限を警告する。workflowは追加しない。
+  - 費用上限の運用値調整の準備: Claudeの費用・token数を記録し、両stageの使用量と適用中の上限をJob Summaryだけに表示する。上限値は、実運用データが揃うまで変更しない。
+- **実装しないもの**: GitHub App移行（ADR-0008の決定を維持）、`schedule` triggerによる定期通知、警告によるレビュー停止、token価格表による費用推計、上限値の変更。
+- **作成するADR**: 0010（Proposedで作成し、承認後Accepted）。
+- **Security considerations**: 運用チェックはcredentialを受け取らず、networkへもアクセスしない。期限日の形式不正時に値を表示しない。modelは検証済みoutputだけを読む。`vars`は`validate_request` jobにだけ渡す。使用量はPRコメントに載せない。
+- **Tests**: 期限判定の境界（期限当日、警告窓、期限切れ、未設定、形式不正、値の非表示）、確認日の鮮度判定、allowlist entryの整合、警告がexit codeを変えないこと、`vars`の到達範囲、運用チェックstepがcredentialを持たないこと、使用量の記録（未報告・型不正は`null`）、使用量がSummaryに出てPRコメントに出ないこと。
+- **Completion criteria**: `python3 -m unittest discover -s tests`が成功する。
+
+上限値の調整は、Summaryに記録された使用量を根拠にして別途行う。これは「architectureを変えない軽微な上限調整」であり、ADRを必要としない。
 
 ### Phase 7：ローカルCLI
 

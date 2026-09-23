@@ -75,12 +75,23 @@ class StageInput:
         value = run.get("model_reported") if isinstance(run, dict) else None
         return value if isinstance(value, str) and value else None
 
+    def _run_value(self, key: str) -> object:
+        # Only a validated document is ever stored, so its run values are already
+        # type-checked. The Codex run has no cost figure and yields None.
+        if not isinstance(self.document, dict):
+            return None
+        run = self.document.get("run")
+        return run.get(key) if isinstance(run, dict) else None
+
     def as_stage(self) -> dict:
         return {
             "status": self.status,
             "model_requested": self.model_requested,
             "model_reported": self.model_reported,
             "detail": self.detail,
+            "input_tokens": self._run_value("input_tokens"),
+            "output_tokens": self._run_value("output_tokens"),
+            "cost_usd": self._run_value("cost_usd"),
         }
 
 

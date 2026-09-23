@@ -146,6 +146,18 @@ class BucketingTests(FinalizeCase):
         self.assertEqual(document["stages"]["codex"]["model_requested"], "gpt-5.6-sol")
         self.assertEqual(document["stages"]["codex"]["model_reported"], "gpt-5.6-sol-2026-04-24")
 
+    def test_usage_is_carried_into_the_stages(self):
+        document, _ = self.finalize()
+        claude, codex = document["stages"]["claude"], document["stages"]["codex"]
+        self.assertEqual((claude["input_tokens"], claude["output_tokens"], claude["cost_usd"]), (1500, 300, 0.0123))
+        # The Responses API reports tokens but no cost.
+        self.assertEqual((codex["input_tokens"], codex["output_tokens"], codex["cost_usd"]), (1000, 200, None))
+
+    def test_a_failed_stage_reports_no_usage(self):
+        document, _ = self.finalize(codex=None, codex_job="failure")
+        codex = document["stages"]["codex"]
+        self.assertEqual((codex["input_tokens"], codex["output_tokens"], codex["cost_usd"]), (None, None, None))
+
     def test_clean_run_reports_every_verification_check(self):
         document, _ = self.finalize()
         self.assertTrue(document["publishable"])

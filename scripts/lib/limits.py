@@ -13,7 +13,7 @@ from dataclasses import dataclass, asdict
 
 # Framework identity. Recorded in every bundle so downstream jobs can verify
 # they are consuming output from a known producer.
-FRAMEWORK_VERSION = "0.3.0"
+FRAMEWORK_VERSION = "0.4.0"
 BUNDLE_SCHEMA_VERSION = "1"
 # Version of the model-output schema (schemas/review-result.schema.json) and of
 # the normalized result written by scripts/normalize-review.py.
@@ -42,7 +42,7 @@ DEFAULT_OPENAI_BASE_URL = "https://api.openai.com"
 CODEX_API_PATH = "/v1/responses"
 
 # Version of the final, merged result document written by finalize-review.py.
-FINAL_SCHEMA_VERSION = "1"
+FINAL_SCHEMA_VERSION = "2"
 
 # Where the review policy came from. Recorded in every result.
 POLICY_SOURCES: tuple[str, ...] = ("repository", "central_default")
@@ -100,6 +100,9 @@ RUN_KEYS: tuple[str, ...] = (
     "run_id",
     "num_turns",
     "duration_ms",
+    "input_tokens",
+    "output_tokens",
+    "cost_usd",
 )
 NORMALIZATION_KEYS: tuple[str, ...] = (
     "dropped_findings",
@@ -202,6 +205,12 @@ FINAL_STAGE_KEYS: tuple[str, ...] = (
     "model_requested",
     "model_reported",
     "detail",
+    # Usage reported by the provider (ADR-0010). Null when the stage did not
+    # produce a usable result or the provider did not report the value. Shown in
+    # the job summary only, never in the PR comment.
+    "input_tokens",
+    "output_tokens",
+    "cost_usd",
 )
 FINAL_VERIFICATION_KEYS: tuple[str, ...] = (
     "schema_valid",
@@ -298,6 +307,12 @@ class Limits:
     max_final_result_bytes: int = 256 * KIB
     # GitHub truncates a job summary above 1 MiB; stay well below it.
     max_job_summary_chars: int = 500000
+    # Phase 6: operational checks (ADR-0010). Both only produce warnings.
+    # A credential whose recorded expiry is this close is reported as expiring.
+    credential_expiry_warning_days: int = 30
+    # An allowlisted model ID not re-confirmed in the official docs within this
+    # many days is reported as due for re-verification.
+    model_verification_max_age_days: int = 90
 
     def as_dict(self) -> dict:
         return asdict(self)

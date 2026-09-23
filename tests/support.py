@@ -214,6 +214,9 @@ def claude_document(**overrides) -> dict:
             "run_id": "123456",
             "num_turns": 1,
             "duration_ms": 1200,
+            "input_tokens": 1500,
+            "output_tokens": 300,
+            "cost_usd": 0.0123,
         },
         "normalization": {"dropped_findings": [], "redactions": 0, "excluded_files": 1},
         "review": {

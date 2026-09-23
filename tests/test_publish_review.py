@@ -176,6 +176,17 @@ class RenderTests(PublishCase):
         self.assertEqual(render_mod.read_marker(body), SNAPSHOT_ID)
         self.assertIn(f"Reviewed commit: `{HEAD_SHA}`", body)
 
+    def test_usage_is_shown_in_the_job_summary_but_never_in_the_comment(self):
+        document = self.make_document()
+        summary = render_mod.render_summary(document)
+        comment = render_mod.render_comment(document)
+        self.assertIn("### 使用量（Job Summaryのみ）", summary)
+        self.assertIn(f"Claude budget USD `{limits_mod.DEFAULT_LIMITS.claude_max_budget_usd}`", summary)
+        self.assertIn(f"Codex max output tokens `{limits_mod.DEFAULT_LIMITS.codex_max_output_tokens}`", summary)
+        self.assertNotIn("使用量", comment)
+        self.assertNotIn("cost USD", comment)
+        self.assertNotIn("budget", comment)
+
     def test_job_summary_has_no_marker(self):
         summary = render_mod.render_summary(self.make_document())
         self.assertNotIn(render_mod.MARKER_PREFIX, summary)

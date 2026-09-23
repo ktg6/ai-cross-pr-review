@@ -224,7 +224,45 @@ def _notes(document: dict, omitted: int) -> list[str]:
     return ["### Notes", "", *notes, ""]
 
 
-def _body(document: dict, selected: list[tuple[str, dict]], *, omitted: int) -> list[str]:
+def _number(value: object, fmt: str) -> str:
+    return code("n/a" if value is None else format(value, fmt))
+
+
+def _usage(document: dict, limits: limits_mod.Limits) -> list[str]:
+    """Provider-reported usage and the caps in force (ADR-0010).
+
+    Operational data for tuning the cost limits. It goes to the job summary only:
+    the PR comment is read by PR authors, who have no use for it.
+    """
+    lines = ["### 使用量（Job Summaryのみ）", ""]
+    for name, label in (("claude", "一次レビュー(Claude)"), ("codex", "再検証(Codex)")):
+        stage = document["stages"][name]
+        lines.append(
+            "- {l}: input tokens {i} / output tokens {o} / cost USD {c}".format(
+                l=label,
+                i=_number(stage["input_tokens"], "d"),
+                o=_number(stage["output_tokens"], "d"),
+                c=_number(stage["cost_usd"], ".4f"),
+            )
+        )
+    lines += [
+        "- 上限: Claude budget USD {b} / Claude max turns {t} / Codex max output tokens {o}".format(
+            b=code(limits.claude_max_budget_usd),
+            t=code(str(limits.claude_max_turns)),
+            o=code(str(limits.codex_max_output_tokens)),
+        ),
+        "",
+    ]
+    return lines
+
+
+def _body(
+    document: dict,
+    selected: list[tuple[str, dict]],
+    *,
+    omitted: int,
+    usage: list[str] | None = None,
+) -> list[str]:
     review = document["review"]
     lines = _header(document)
     lines += ["### Summary", "", escape_markdown(review["summary"]), ""]
@@ -259,15 +297,16 @@ def _body(document: dict, selected: list[tuple[str, dict]], *, omitted: int) -> 
         lines += [""]
 
     lines += _notes(document, omitted)
+    lines += usage or []
     lines += ["---", "", FOOTER]
     return lines
 
 
-def _render(document: dict, max_chars: int, prefix: list[str]) -> str:
+def _render(document: dict, max_chars: int, prefix: list[str], usage: list[str] | None = None) -> str:
     """Render, dropping the least important entries until it fits."""
     ordered = _ordered_entries(document)
     for keep in range(len(ordered), -1, -1):
-        body = "\n".join(prefix + _body(document, ordered[:keep], omitted=len(ordered) - keep)) + "\n"
+        body = "\n".join(prefix + _body(document, ordered[:keep], omitted=len(ordered) - keep, usage=usage)) + "\n"
         if len(body) <= max_chars:
             return body
     raise RenderError("rendered output exceeds the limit even without entries")
@@ -275,7 +314,7 @@ def _render(document: dict, max_chars: int, prefix: list[str]) -> str:
 
 def render_summary(document: dict, limits: limits_mod.Limits = limits_mod.DEFAULT_LIMITS) -> str:
     """Render the job summary. No marker: this text is never posted."""
-    return _render(document, limits.max_job_summary_chars, [])
+    return _render(document, limits.max_job_summary_chars, [], _usage(document, limits))
 
 
 def render_comment(document: dict, limits: limits_mod.Limits = limits_mod.DEFAULT_LIMITS) -> str:
