@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -286,6 +287,7 @@ def normalize(
             "run_id": invocation.get("run_id"),
             "num_turns": envelope.get("num_turns") if isinstance(envelope.get("num_turns"), int) else None,
             "duration_ms": invocation.get("duration_ms"),
+            **_usage(envelope),
         },
         "normalization": {
             "dropped_findings": dropped,
@@ -318,6 +320,38 @@ def _model_reported(envelope: dict) -> str | None:
             first = sorted(value)[0]
             return bundle_mod.sanitize_text(first, 100)
     return None
+
+
+def _count(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _usage(envelope: dict) -> dict:
+    """Token counts and cost as reported by the CLI, for operational tuning.
+
+    ``input_tokens`` is the sum of uncached, cache-write and cache-read input so
+    that it counts every input token the model processed, like the Responses
+    API's figure. A value the CLI did not report, or reported in an unexpected
+    shape, is recorded as None rather than guessed.
+    """
+    usage = envelope.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    parts = [
+        _count(usage.get(key))
+        for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        if key in usage
+    ]
+    input_tokens = sum(parts) if parts and all(part is not None for part in parts) else None
+    cost = envelope.get("total_cost_usd")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+        cost = None
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": _count(usage.get("output_tokens")),
+        "cost_usd": cost,
+    }
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

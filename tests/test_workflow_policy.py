@@ -288,6 +288,24 @@ class PermissionAndSecretTests(unittest.TestCase):
             if name not in ("claude_review", "codex_review", "prepare", "comment"):
                 self.assertNotIn("secrets.", body, name)
 
+    def test_credential_expiry_dates_are_variables_read_only_by_validate_request(self):
+        # ADR-0010: expiry dates are non-secret repository variables. They reach
+        # the operational check in validate_request and nothing else.
+        expected = {
+            "read_token_expires_on": "AI_REVIEW_READ_TOKEN_EXPIRES_ON",
+            "comment_token_expires_on": "AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON",
+            "claude_token_expires_on": "AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON",
+            "openai_key_expires_on": "AI_REVIEW_OPENAI_KEY_EXPIRES_ON",
+        }
+        found = re.findall(r"(?m)^\s+([a-z_]+): \$\{\{ vars\.([A-Z_]+) \}\}$", self.workflow)
+        self.assertEqual(dict(found), expected)
+        self.assertEqual(len(found), len(expected))
+        for name, body in self.jobs.items():
+            if name != "validate_request":
+                self.assertNotIn("vars.", body, name)
+        for variable in expected.values():
+            self.assertNotIn(variable, SECRETS)
+
 
 class NoTargetCodeTests(unittest.TestCase):
     def setUp(self):
@@ -352,6 +370,7 @@ class RuntimeActionTests(unittest.TestCase):
     def test_each_step_sees_only_its_own_credential(self):
         expectations = {
             "Validate request": set(),
+            "Check operational health": set(),
             "Prepare review bundle": {"GITHUB_TOKEN"},
             "Run read-only primary review": {"CLAUDE_CODE_OAUTH_TOKEN"},
             "Run verification review": {"OPENAI_API_KEY"},
@@ -374,6 +393,18 @@ class RuntimeActionTests(unittest.TestCase):
             body = step_body(self.action, step)
             self.assertNotIn("github_token", body)
             self.assertNotIn("GITHUB_TOKEN", body)
+
+    def test_operational_check_reads_validated_models_and_holds_no_credential(self):
+        body = step_body(self.action, "Check operational health")
+        self.assertIn("if: ${{ inputs.step == 'validate' }}", body)
+        self.assertIn("continue-on-error: true", body)
+        self.assertEqual(self.action.count("continue-on-error: true"), 1)
+        self.assertIn("${{ steps.validate.outputs.claude_model }}", body)
+        self.assertIn("${{ steps.validate.outputs.codex_model }}", body)
+        self.assertNotIn("inputs.claude_model", body)
+        self.assertNotIn("inputs.codex_model", body)
+        for name in ("github_token", "claude_code_oauth_token", "openai_api_key"):
+            self.assertNotIn(name, body)
 
     def test_publish_step_never_receives_an_ai_provider_secret(self):
         body = step_body(self.action, "Publish review comment")
@@ -446,7 +477,7 @@ class ActionInvocationContractTests(unittest.TestCase):
         self.assertEqual(
             sorted(scripts),
             sorted([
-                "validate-request.py", "prepare-review.py", "run-review.py", "normalize-review.py",
+                "validate-request.py", "check-operations.py", "prepare-review.py", "run-review.py", "normalize-review.py",
                 "run-codex-review.py", "normalize-codex-review.py", "finalize-review.py",
                 "report-summary.py", "publish-review.py",
             ]),
@@ -538,6 +569,7 @@ class DocumentationConsistencyTests(unittest.TestCase):
         "0007-codex-verification-via-responses-api.md",
         "0008-cross-repository-authentication.md",
         "0009-documentation-and-readme-policy.md",
+        "0010-operations-hardening.md",
     )))
 
     def test_repository_paths_cited_in_the_new_docs_exist(self):

@@ -10,6 +10,8 @@ Standard library only.
 
 from __future__ import annotations
 
+import math
+
 from . import bundle as bundle_mod
 from . import limits as limits_mod
 from . import models as models_mod
@@ -18,6 +20,9 @@ SEVERITY_ORDER = {name: index for index, name in enumerate(limits_mod.SEVERITIES
 BUCKETS: tuple[str, ...] = ("adopted", "added", "deferred", "rejected", "duplicates")
 
 _SHA40 = "0123456789abcdef"
+# Sanity bound for a reported per-run cost. A larger value is not a plausible
+# report and is refused instead of rendered.
+_MAX_COST_USD = 100000.0
 
 
 class ResultError(Exception):
@@ -142,6 +147,9 @@ def _validate_stage(payload: object, field: str) -> dict:
         "model_requested": _optional_text(stage["model_requested"], f"{field}.model_requested", 100),
         "model_reported": _optional_text(stage["model_reported"], f"{field}.model_reported", 100),
         "detail": _optional_text(stage["detail"], f"{field}.detail", 500),
+        "input_tokens": _nonnegative_int(stage["input_tokens"], f"{field}.input_tokens", nullable=True),
+        "output_tokens": _nonnegative_int(stage["output_tokens"], f"{field}.output_tokens", nullable=True),
+        "cost_usd": _cost(stage["cost_usd"], f"{field}.cost_usd"),
     }
 
 
@@ -203,6 +211,17 @@ def _nonnegative_int(value: object, field: str, *, nullable: bool = False) -> in
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ResultError(f"{field} is not a non-negative integer")
     return value
+
+
+def _cost(value: object, field: str) -> float | None:
+    """A non-negative, finite USD amount, or None when it was not reported."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ResultError(f"{field} is not a number")
+    if not math.isfinite(value) or not 0 <= value <= _MAX_COST_USD:
+        raise ResultError(f"{field} is not a non-negative amount within range")
+    return float(value)
 
 
 def _positive_line(value: object, field: str, *, nullable: bool = False) -> int | None:
@@ -345,6 +364,9 @@ def validate_normalized_claude_document(
         model_validator=models_mod.validate_claude_model,
         effort_validator=models_mod.validate_claude_effort,
     )
+    for field in ("input_tokens", "output_tokens"):
+        run[field] = _nonnegative_int(run[field], f"stage result.run.{field}", nullable=True)
+    run["cost_usd"] = _cost(run["cost_usd"], "stage result.run.cost_usd")
     normalization = _exact_keys(payload["normalization"], limits_mod.NORMALIZATION_KEYS, "normalization")
     findings = payload["review"].get("findings") if isinstance(payload["review"], dict) else None
     review = _exact_keys(payload["review"], limits_mod.RESULT_KEYS, "review")

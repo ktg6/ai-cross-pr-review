@@ -118,6 +118,24 @@ inputs:
     description: codex_review jobの実行結果（needs.<job>.result）。
     required: false
     default: failure
+  read_token_expires_on:
+    description: >-
+      read tokenの期限（YYYY-MM-DD）。repository variableから受け取る日付で、Secretではない。
+      validate stepの運用チェックだけが使う。
+    required: false
+    default: ""
+  comment_token_expires_on:
+    description: comment tokenの期限（YYYY-MM-DD）。validate stepの運用チェックだけが使う。
+    required: false
+    default: ""
+  claude_token_expires_on:
+    description: Claude tokenの期限（YYYY-MM-DD）。validate stepの運用チェックだけが使う。
+    required: false
+    default: ""
+  openai_key_expires_on:
+    description: OpenAI keyの期限またはrotation期日（YYYY-MM-DD）。validate stepの運用チェックだけが使う。
+    required: false
+    default: ""
   api_url:
     description: GitHub API endpoint。AIには決定させない。
     required: false
@@ -231,6 +249,29 @@ runs:
           --codex-effort "$AI_REVIEW_CODEX_EFFORT" \
           --policy-path "$AI_REVIEW_POLICY_PATH" \
           --server-url "$AI_REVIEW_SERVER_URL"
+
+    # 運用チェック（ADR-0010）。credential期限とmodel allowlistの再確認期限を
+    # Job Summaryとannotationへ警告する。警告だけでレビューは停止しない。
+    # modelは入力値ではなく、検証済みのstep outputを使う。
+    - name: Check operational health
+      if: ${{ inputs.step == 'validate' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        AI_REVIEW_CLAUDE_MODEL: ${{ steps.validate.outputs.claude_model }}
+        AI_REVIEW_CODEX_MODEL: ${{ steps.validate.outputs.codex_model }}
+        AI_REVIEW_READ_TOKEN_EXPIRES_ON: ${{ inputs.read_token_expires_on }}
+        AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON: ${{ inputs.comment_token_expires_on }}
+        AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON: ${{ inputs.claude_token_expires_on }}
+        AI_REVIEW_OPENAI_KEY_EXPIRES_ON: ${{ inputs.openai_key_expires_on }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../../scripts/check-operations.py" \
+          --claude-model "$AI_REVIEW_CLAUDE_MODEL" \
+          --codex-model "$AI_REVIEW_CODEX_MODEL" \
+          --read-token-expires-on "$AI_REVIEW_READ_TOKEN_EXPIRES_ON" \
+          --comment-token-expires-on "$AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON" \
+          --claude-token-expires-on "$AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON" \
+          --openai-key-expires-on "$AI_REVIEW_OPENAI_KEY_EXPIRES_ON"
 
     - name: Prepare review bundle
       id: prepare

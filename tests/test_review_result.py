@@ -528,6 +528,31 @@ class NormalizeTests(TempDirCase):
         self.assertEqual(document["review"]["findings"][0]["path"], "src/app.py")
         self.assertEqual(document["normalization"]["excluded_files"], 1)
 
+    def test_usage_is_recorded_from_the_envelope(self):
+        usage = {
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 20,
+            "cache_read_input_tokens": 3,
+            "output_tokens": 40,
+        }
+        run = self._normalize(envelope(model_payload(), usage=usage, total_cost_usd=0.25))["run"]
+        # Cached input counts as input: the figure covers every token processed.
+        self.assertEqual((run["input_tokens"], run["output_tokens"], run["cost_usd"]), (123, 40, 0.25))
+
+    def test_unreported_or_malformed_usage_is_recorded_as_null(self):
+        cases = {
+            "absent": envelope(model_payload(), total_cost_usd=None),
+            "wrong types": envelope(model_payload(), usage={"input_tokens": "9", "output_tokens": -1}, total_cost_usd="0.1"),
+            "not an object": envelope(model_payload(), usage=[1, 2], total_cost_usd=True),
+            "partial cache": envelope(model_payload(), usage={"input_tokens": 5, "cache_read_input_tokens": None}, total_cost_usd=float("nan")),
+        }
+        for name, env in cases.items():
+            with self.subTest(case=name):
+                for path in self.output_dir.glob("*"):
+                    path.unlink()
+                run = self._normalize(env)["run"]
+                self.assertEqual((run["input_tokens"], run["output_tokens"], run["cost_usd"]), (None, None, None))
+
     def test_findings_outside_the_snapshot_are_dropped(self):
         payload = model_payload(
             findings=[

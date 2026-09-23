@@ -68,6 +68,15 @@ read token と comment token は、対象 repository に限定した fine-graine
 
 中央 repository の `GITHUB_TOKEN` は、別の repository にはアクセスできない。そのため、対象 repository へのアクセスには上記の token を使う。
 
+各 Secret の期限日は、中央 repository の repository variable（Secret ではない）に `YYYY-MM-DD` 形式で設定できる（任意）。設定すると、実行のたびに期限を確認し、期限切れや 30 日以内の期限を Job Summary と annotation で警告する。未設定の場合、期限は監視されない。Secret を更新したら、期限日も更新すること。
+
+| Variable | 対象 |
+|---|---|
+| `AI_REVIEW_READ_TOKEN_EXPIRES_ON` | `AI_REVIEW_READ_TOKEN` |
+| `AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON` | `AI_REVIEW_COMMENT_TOKEN` |
+| `AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON` | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `AI_REVIEW_OPENAI_KEY_EXPIRES_ON` | `OPENAI_API_KEY`（期限のない key には rotation 期日を設定する） |
+
 ### 2. 実行する
 
 中央実行 repository の Actions から「AI Cross Review」を選び、次を指定して実行する。
@@ -87,6 +96,8 @@ read token と comment token は、対象 repository に限定した fine-graine
 ### 3. 結果を確認する
 
 - 実行の Job Summary に、最終結果が表示される。
+- Job Summary には、各 stage の使用量（token 数、Claude の費用）と、適用中の上限も表示される。これらは PR コメントには載らない。
+- Job Summary の「運用チェック」に、Secret の期限と、選択したモデルの公式ドキュメントでの確認日が表示される。警告が出てもレビューは止まらない。
 - 詳細な Markdown と JSON は、`ai-review-final-*` という名前の artifact に保存される（保持 7 日）。
 - `pr_comment` を選び、投稿できる状態のとき、対象 PR に定型のコメントが 1 件付く。同じ snapshot への再実行は、そのコメントを更新する。
 - 実行中に PR の head または base が変わった場合、結果は投稿されない。
@@ -114,6 +125,7 @@ read token と comment token は、対象 repository に限定した fine-graine
 - 対象の PR の diff と、レビュー結果は、中央実行 repository の Job Summary と artifact に残る。中央 repository は非公開にし、閲覧できる人を、対象 repository を閲覧できる人と同等以下に保つこと。
 - 対象 repository のコードは、Anthropic と OpenAI に送信される。対象組織の外部 AI 利用方針に従い、許可された repository だけを起動すること。
 - モデルの ID は公式ドキュメントの記載から転記しており、実 API での動作確認はまだ行っていない。初回の実行で、モデルが受理されない場合がある。その場合は失敗として表示される。
+- 各モデル ID には、公式ドキュメントで確認した日付を `scripts/lib/models.py` に記録している。確認日が未記録か 90 日を超えると、運用チェックが再確認を促す。再確認では、公式ドキュメント、`models.py`、workflow の選択肢、ADR の References、テストの順に更新する。
 
 ## 入力制限
 
