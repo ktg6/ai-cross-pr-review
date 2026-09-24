@@ -16,6 +16,7 @@ GitHub Actions、Claude、Codexを利用した汎用AI PRレビュー基盤を�
 
 - 通常CIとAI Reviewを分離する。
 - レビューは信頼された非公開の中央実行repositoryでだけ実行する。レビュー対象repositoryへworkflowを追加しない。
+- 例外は、trustedな利用者が手元で実行するローカルCLI（`scripts/review-local.py`）だけである。ローカルCLIは結果をローカルディレクトリへ保存するだけで、GitHubへの書き込み経路を持たない。tokenは環境変数からだけ読み、CLI引数で受け取らない（ADR-0011）。
 - 中央実行repositoryは`workflow_dispatch`のworkflowを1本だけ提供する。`workflow_call`を提供しない。将来追加する場合も`validate_request` jobを必須の前段とし、allowlist検証を迂回できないようにする。
 - jobは`validate_request`、`prepare`、`claude_review`、`codex_review`、`finalize`、`report`、`comment`に分離する。
 - AI jobにGitHub write権限と対象repositoryへのcredentialを渡さない。各jobが持つ`contents: read`は中央repository自身のcheckout用で、そのtokenは対象repositoryへ到達せず、stepへも渡さない。PRコメントは決定論的なpublisher（`comment` job）だけが行う。

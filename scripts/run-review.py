@@ -108,20 +108,29 @@ def platform_key() -> str | None:
 def verify_cli(
     claude_bin: str,
     *,
+    version_env: dict[str, str],
     expected_version: str = limits_mod.CLAUDE_CODE_VERSION,
     expected_sha256: str | None = None,
     run=subprocess.run,
-) -> str:
-    """Verify the CLI version string and the binary digest. Returns the digest."""
+) -> tuple[str, Path]:
+    """Check the digest before running the CLI; return its digest and resolved path."""
     if expected_sha256 is None:
         key = platform_key()
         if key is None or key not in limits_mod.CLAUDE_CODE_SHA256:
             raise ReviewError("no pinned Claude Code digest for this platform")
         expected_sha256 = limits_mod.CLAUDE_CODE_SHA256[key]
 
+    target = Path(claude_bin).resolve()
+    if not target.is_file():
+        raise ReviewError("claude binary could not be resolved to a file")
+    digest = bundle_mod.sha256_hex(target.read_bytes())
+    if digest != expected_sha256:
+        raise ReviewError("claude binary digest does not match the pinned release manifest")
+
     try:
         proc = run(
-            [claude_bin, "--version"],
+            [str(target), "--version"],
+            env=version_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -138,13 +147,7 @@ def verify_cli(
     if not reported.startswith(expected_version) or reported[len(expected_version) : len(expected_version) + 1] not in ("", " "):
         raise ReviewError("claude version does not match the pinned version")
 
-    target = Path(claude_bin).resolve()
-    if not target.is_file():
-        raise ReviewError("claude binary could not be resolved to a file")
-    digest = bundle_mod.sha256_hex(target.read_bytes())
-    if digest != expected_sha256:
-        raise ReviewError("claude binary digest does not match the pinned release manifest")
-    return digest
+    return digest, target
 
 
 # -- prompt assembly ----------------------------------------------------------
@@ -276,17 +279,21 @@ def run_review(
     schema_obj = json.loads(schema_bytes.decode("utf-8"))
     schema_json = json.dumps(schema_obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
-    cli_digest = verify_cli(claude_bin, expected_sha256=expected_sha256, run=run)
-    log(f"claude cli verified: version={limits_mod.CLAUDE_CODE_VERSION}")
-
     workdir = Path(workdir)
     for name in ("home", "config", "tmp", "cwd"):
         (workdir / name).mkdir(parents=True, exist_ok=True)
+    cli_digest, cli_path = verify_cli(
+        claude_bin,
+        version_env=build_env(workdir, None),
+        expected_sha256=expected_sha256,
+        run=run,
+    )
+    log(f"claude cli verified: version={limits_mod.CLAUDE_CODE_VERSION}")
 
     nonce = nonce or secrets.token_hex(16)
     document = build_untrusted_document(b, nonce)
     argv = build_argv(
-        claude_bin,
+        str(cli_path),
         model=model,
         effort=effort,
         prompt_file=Path(prompt_file),

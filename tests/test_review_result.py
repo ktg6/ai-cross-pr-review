@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
@@ -378,9 +379,54 @@ class AdapterTests(TempDirCase):
             self._run(cli)
         self.assertIn("version", str(ctx.exception))
         good = self._fake()
+
+        def unexpected_run(*args, **kwargs):
+            self.fail("a CLI with the wrong digest must not be executed")
+
         with self.assertRaises(run_review.ReviewError) as ctx:
-            self._run(good, expected_sha256="0" * 64)
+            self._run(good, expected_sha256="0" * 64, run=unexpected_run)
         self.assertIn("digest", str(ctx.exception))
+
+    def test_version_check_receives_no_tokens(self):
+        cli = self._fake()
+        invocations = []
+
+        def recording_run(argv, **kwargs):
+            invocations.append((argv, kwargs))
+            return subprocess.run(argv, **kwargs)
+
+        with mock.patch.dict(os.environ, {
+            "OPENAI_API_KEY": "canary-openai-not-real",
+            "AI_REVIEW_GITHUB_TOKEN": CANARY_GITHUB,
+            "GITHUB_TOKEN": "canary-foreign-not-real",
+        }):
+            self._run(cli, run=recording_run)
+
+        self.assertEqual(len(invocations), 2)
+        version_argv, version_kwargs = invocations[0]
+        self.assertEqual(version_argv[-1], "--version")
+        self.assertEqual(set(version_kwargs["env"]) & {
+            "OPENAI_API_KEY", "AI_REVIEW_GITHUB_TOKEN", "GITHUB_TOKEN", run_review.TOKEN_ENV,
+        }, set())
+        self.assertEqual(invocations[1][1]["env"][run_review.TOKEN_ENV], CANARY_OAUTH)
+
+    def test_verified_symlink_target_is_used_for_review(self):
+        cli = self._fake()
+        link = self.tmp / "claude-link"
+        link.symlink_to(cli)
+        replacement = write_fake_cli(self.tmp / "replacement-claude", exit_code=1)
+        invoked_paths = []
+
+        def switching_run(argv, **kwargs):
+            invoked_paths.append(argv[0])
+            result = subprocess.run(argv, **kwargs)
+            if argv[-1] == "--version":
+                link.unlink()
+                link.symlink_to(replacement)
+            return result
+
+        self._run(link, run=switching_run, expected_sha256=sha256_file(cli))
+        self.assertEqual(invoked_paths, [str(cli.resolve()), str(cli.resolve())])
 
     def test_pinned_digest_map_covers_the_runner_platform(self):
         self.assertIn("linux-x64", limits_mod.CLAUDE_CODE_SHA256)

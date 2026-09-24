@@ -246,7 +246,20 @@ Phase 7で実装する際の前提は次のとおり。
 
 ### Phase 7：ローカルCLI
 
-- 4.9のとおり。
+- **Goal**: trustedな利用者が手元で、中央実行と同じ処理（validate → prepare → Claude一次 → Codex再検証 → finalize）を実行し、最終Markdown / JSONをローカルディレクトリへ保存する。PRへは投稿しない。
+- **実装するもの**:
+  - entry point `scripts/review-local.py`。既存scriptの関数（`build_request`、`prepare`、`run_review`、`normalize`、`run_codex_review`、`finalize`、`report`）をprocess内で順に呼ぶ薄いorchestratorとする。検証・正規化・最終処理のロジックを複製しない。
+  - token: `AI_REVIEW_GITHUB_TOKEN`（read、未設定なら未認証で取得）、`CLAUDE_CODE_OAUTH_TOKEN`、`OPENAI_API_KEY`を環境変数からだけ読む。CLI引数では受け取らない。各tokenは使用するstageだけへ渡す。`GITHUB_TOKEN`など他の環境変数は読まない。AI provider用の2つが未設定なら、network accessの前に停止する。
+  - GitHub API: GET以外のmethodを拒否するread-only transport（`lib/github.py`の`read_only_transport`）を`prepare`へ渡す。
+  - 出力: `--output-dir`（存在しないか空のdirectory。新規作成時はmode 0700、既存の場合はgroup・otherに権限があれば拒否）へ`final-review.json`と`review-summary.md`だけを書く。summaryはstdoutにも表示する。bundle、git作業領域、raw provider response、normalized resultは一時directoryに置き、終了時に削除する。
+  - 実行状態: stageの失敗は中央実行と同じく`finalize`へ`failure` / `skipped`として渡し、「問題なし」に変換しない。Claudeが失敗した場合はCodexを実行しない。`prepare`の失敗時は最終結果を生成しない。exit codeは、最終結果が`publishable`（両stage成功かつ全検証通過）なら0、それ以外は2とする。
+  - `request.output_mode`は`summary_only`に固定する。最終結果のschemaは変えない。
+  - Claude CLIは中央実行と同じ固定version・release digest検証を通す。利用者は固定versionを手元に導入する。
+- **実装しないもの**: PRへの投稿経路、`publish-review.py`のimport、tokenのCLI引数、GHES対応（API URL・server URLの指定）、運用チェック（credential期限・model確認日の警告）、結果のキャッシュ・再開、workflowの変更。
+- **作成するADR**: 0011（Proposedで作成し、承認後Accepted）。
+- **Security considerations**: ローカル経路にGitHub書き込みの呼び出しを置かない（静的検査とread-only transportの二重）。tokenはargvに現れない。AI stageへGitHub tokenを渡さず、Claude CLIの環境は既存の最小環境（利用者の`HOME`・設定を読まない）を使う。raw provider responseを残さない。PRコード・hooks・Agent設定を実行しない点は既存`prepare`のまま。
+- **Tests**: 固定remote・fake GitHub・fake Claude CLI・fake Responses APIによるend-to-end、tokenの到達範囲（canary）、GitHub requestがGETだけであること、`publish-review.py`がimportされないこと、token用のCLI引数がないこと、AI tokenの事前検査、stage失敗時のexit codeと最終結果、出力directoryの拒否条件、出力に中間ファイルとtokenが残らないこと。
+- **Completion criteria**: `python3 -m unittest discover -s tests`が成功する。
 
 ## 6. テスト方針
 
