@@ -122,6 +122,22 @@ def _urllib_transport_factory(max_bytes: int) -> Transport:
     return transport
 
 
+def read_only_transport(transport: Transport | None = None, *, max_bytes: int = 4 * 1024 * 1024) -> Transport:
+    """Wrap a transport so that every method other than GET is refused.
+
+    Used by the local CLI (ADR-0011), which must have no GitHub write path: the
+    refusal happens before the request leaves the process.
+    """
+    inner = transport or _urllib_transport_factory(max_bytes)
+
+    def guarded(method: str, url: str, headers: dict, body: bytes | None = None) -> tuple[int, dict, bytes]:
+        if method != "GET" or body is not None:
+            raise GitHubError(f"read-only transport refused a {method} request")
+        return inner(method, url, headers, body)
+
+    return guarded
+
+
 class GitHubClient:
     def __init__(
         self,
