@@ -78,6 +78,15 @@ class PullRequestTests(unittest.TestCase):
         with self.assertRaisesRegex(validate.RequestError, "does not match the requested repository"):
             build(pull_request="https://github.com/evil/other/pull/7")
 
+    def test_encoded_repository_or_pr_number_stops(self):
+        for url in (
+            "https://github.com/acme%2Fother/widgets/pull/7",
+            "https://github.com/acme/widgets%2Fother/pull/7",
+            "https://github.com/acme/widgets/pull/%37",
+        ):
+            with self.subTest(url=url), self.assertRaises((validate.RequestError, gh.ValidationError)):
+                build(pull_request=url)
+
     def test_url_on_another_host_or_scheme_stops(self):
         for value in (
             "https://evil.example/acme/widgets/pull/7",
