@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/ktg6/ai-cross-pr-review/schemas/codex-review.schema.json",
   "title": "AI cross-review verification result (model output)",
-  "description": "Codexが返す構造化された再検証結果。OpenAI Responses APIのstrict structured outputとして送るため、すべてのobjectはadditionalProperties=falseで、全propertyをrequiredに列挙する。省略可能な値はnullで表現する。repository、PR番号、SHA、投稿先はモデルに決定させないため本schemaには含めない。これらはtrusted wrapperが付与する。",
+  "description": "Codexが返す構造化された再検証結果。Codex CLIの--output-schema（strict structured output）として渡すため、すべてのobjectはadditionalProperties=falseで、全propertyをrequiredに列挙する。省略可能な値はnullで表現する。repository、PR番号、SHA、投稿先はモデルに決定させないため本schemaには含めない。これらはtrusted wrapperが付与する。",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "summary", "claim_reviews", "additional_findings", "insufficient_context", "limitations"],

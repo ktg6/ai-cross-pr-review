@@ -13,7 +13,7 @@ from dataclasses import dataclass, asdict
 
 # Framework identity. Recorded in every bundle so downstream jobs can verify
 # they are consuming output from a known producer.
-FRAMEWORK_VERSION = "0.4.0"
+FRAMEWORK_VERSION = "0.5.0"
 BUNDLE_SCHEMA_VERSION = "1"
 # Version of the model-output schema (schemas/review-result.schema.json) and of
 # the normalized result written by scripts/normalize-review.py.
@@ -35,11 +35,15 @@ CLAUDE_CODE_SHA256: dict[str, str] = {
 
 # Model providers recorded in the trusted wrapper. A model never sets its own.
 REVIEW_PROVIDER = "anthropic-claude-code-cli"
-CODEX_PROVIDER = "openai-responses-api"
+CODEX_PROVIDER = "openai-codex-cli"
 
-# OpenAI Responses API endpoint used by the verification stage (ADR-0007).
-DEFAULT_OPENAI_BASE_URL = "https://api.openai.com"
-CODEX_API_PATH = "/v1/responses"
+# Pinned Codex CLI version for the verification stage (ADR-0012). The CLI is
+# installed and signed in by the operator of the self-hosted runner (or by the
+# local CLI user); the stage refuses any other version.
+CODEX_CLI_VERSION = "0.155.1"
+# The only accepted Codex sign-in: a ChatGPT subscription. An API-key sign-in
+# (usage-based billing) is refused before the model is called.
+CODEX_AUTH_MODE = "chatgpt"
 
 # Version of the final, merged result document written by finalize-review.py.
 FINAL_SCHEMA_VERSION = "2"
@@ -155,14 +159,14 @@ CODEX_NORMALIZED_RESULT_KEYS: tuple[str, ...] = (
 )
 CODEX_RUN_KEYS: tuple[str, ...] = (
     "provider",
-    "endpoint",
+    "cli_version",
+    "auth_mode",
     "model_requested",
     "model_reported",
     "effort",
     "tools_enabled",
-    "store",
     "run_id",
-    "response_id",
+    "thread_id",
     "status",
     "input_tokens",
     "output_tokens",
@@ -293,11 +297,10 @@ class Limits:
     max_comment_pages: int = 10
     publish_retry_attempts: int = 3
     publish_retry_delay_seconds: float = 2.0
-    # Phase 5: verification stage (OpenAI Responses API) and final merge.
+    # Phase 5: verification stage and final merge. Phase 8 (ADR-0012): the stage
+    # runs the Codex CLI, whose JSONL event stream on stdout is bounded here.
     codex_timeout_seconds: int = 600
-    codex_max_output_tokens: int = 16000
-    codex_retry_attempts: int = 3
-    codex_retry_delay_seconds: float = 2.0
+    codex_max_event_stream_bytes: int = 4 * KIB * KIB
     max_claim_reviews: int = 20
     max_additional_findings: int = 20
     max_insufficient_context: int = 10

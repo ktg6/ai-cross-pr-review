@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -32,7 +31,6 @@ EXIT_UNEXPECTED = 1
 EXIT_STOP = 2
 
 RESULT_NAME = "codex-result.json"
-TOKEN_ENV = "OPENAI_API_KEY"
 
 SEVERITY_ORDER = {name: index for index, name in enumerate(limits_mod.SEVERITIES)}
 
@@ -342,14 +340,14 @@ def normalize(
         },
         "run": {
             "provider": invocation.get("provider"),
-            "endpoint": invocation.get("endpoint"),
+            "cli_version": invocation.get("cli_version"),
+            "auth_mode": invocation.get("auth_mode"),
             "model_requested": invocation.get("model_requested"),
             "model_reported": invocation.get("model_reported"),
             "effort": invocation.get("effort"),
             "tools_enabled": invocation.get("tools_enabled"),
-            "store": invocation.get("store"),
             "run_id": invocation.get("run_id"),
-            "response_id": invocation.get("response_id"),
+            "thread_id": invocation.get("thread_id"),
             "status": invocation.get("status"),
             "input_tokens": invocation.get("input_tokens"),
             "output_tokens": invocation.get("output_tokens"),
@@ -399,7 +397,6 @@ def main(argv: list[str] | None = None) -> int:
             raw_file=args.raw_file,
             invocation_file=args.invocation_file,
             output_dir=args.output_dir,
-            token=os.environ.get(TOKEN_ENV) or None,
         )
     except (NormalizeError, bundle_mod.BundleError, limits_mod.LimitExceeded) as err:
         log(f"stop: {err}")

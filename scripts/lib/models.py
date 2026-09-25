@@ -52,7 +52,11 @@ DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 CLAUDE_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_CLAUDE_EFFORT = "high"
 
-# OpenAI models usable through the Responses API for the verification stage.
+# OpenAI models for the verification stage, run through the Codex CLI with a
+# ChatGPT subscription sign-in (ADR-0012). The dates record confirmation in the
+# official Models documentation. Availability also depends on the ChatGPT plan:
+# gpt-5.6-sol was confirmed through the pinned CLI with a Plus sign-in on
+# 2026-09-25; an ID the plan does not serve fails the stage closed.
 # Keep unverified IDs out of both this list and the workflow choices.
 _OPENAI_MODELS_DOC = "https://developers.openai.com/api/docs/models"
 CODEX_MODEL_ENTRIES: tuple[ModelEntry, ...] = (
@@ -64,8 +68,8 @@ CODEX_MODEL_ENTRIES: tuple[ModelEntry, ...] = (
 CODEX_MODELS: tuple[str, ...] = tuple(entry.model_id for entry in CODEX_MODEL_ENTRIES)
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 
-# Responses API reasoning.effort levels. "none" is deliberately excluded: the
-# verification stage must reason.
+# Reasoning effort levels (the CLI's model_reasoning_effort). "none" is
+# deliberately excluded: the verification stage must reason.
 CODEX_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_CODEX_EFFORT = "high"
 

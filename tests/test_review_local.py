@@ -1,9 +1,9 @@
 """Phase 7 tests: the local CLI (ADR-0011).
 
 Every external system is replaced: GitHub is an in-memory transport over a
-local git remote, the Claude Code CLI is a fake executable, and the OpenAI
-Responses API is an injected transport. No network, no real credential, no real
-PR, and no reviewed code is ever executed.
+local git remote, the Claude Code CLI is a fake executable, and the Codex CLI
+is an injected ``run`` function. No network, no real credential or sign-in, no
+real PR, and no reviewed code is ever executed.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import support  # noqa: E402
-from support import codex_payload, fake_transport, responses_envelope  # noqa: E402
+from support import codex_events, codex_payload, fake_codex_run  # noqa: E402
 
 import test_prepare_review as prepare_tests  # noqa: E402
 import test_review_result as claude_tests  # noqa: E402
@@ -52,6 +52,9 @@ FOREIGN_CANARIES = {
     "GH_TOKEN": "canary-foreign-gh-token-0001",
     "AI_REVIEW_COMMENT_TOKEN": "canary-foreign-comment-token-0001",
     "AI_REVIEW_READ_TOKEN": "canary-foreign-read-token-0001",
+    # ADR-0012: an API key in the environment is never read or passed on.
+    "OPENAI_API_KEY": OPENAI_CANARY,
+    "CODEX_API_KEY": "canary-foreign-codex-api-key-0001",
 }
 ALL_CANARIES = (GITHUB_CANARY, CLAUDE_CANARY, OPENAI_CANARY, *FOREIGN_CANARIES.values())
 
@@ -82,25 +85,31 @@ class LocalCase(unittest.TestCase):
         self.remote, shas = prepare_tests.build_standard_remote(self.tmp)
         self.github = prepare_tests.FakeGitHub(shas)
         self.record_path = self.tmp / "claude-record.json"
-        self.codex_requests: list[dict] = []
+        self.codex_calls: list[dict] = []
+        self.codex_home = self.tmp / "codex-home"
+        self.codex_home.mkdir()
         self.out = self.tmp / "out"
         self.summary = self.tmp / "summary.md"
 
-    def run_local(self, *, cli_exit=0, envelope_obj=None, responses=None, output_dir=None, **overrides):
+    @property
+    def codex_requests(self) -> list[dict]:
+        return [call for call in self.codex_calls if call["argv"][1:2] == ["exec"]]
+
+    def run_local(self, *, cli_exit=0, envelope_obj=None, codex_exit=0, output_dir=None, **overrides):
         cli = write_recording_cli(self.tmp / "fake-claude", self.record_path, envelope_obj=envelope_obj, exit_code=cli_exit)
-        responses = responses if responses is not None else [(200, responses_envelope(codex_payload()))]
         kwargs = dict(
             repository=prepare_tests.REPOSITORY,
             pull_request=str(prepare_tests.PR_NUMBER),
             output_dir=output_dir or self.out,
             github_token=GITHUB_CANARY,
             claude_token=CLAUDE_CANARY,
-            openai_key=OPENAI_CANARY,
+            codex_home=self.codex_home,
             claude_bin=str(cli),
+            codex_bin="/opt/codex/bin/codex",
             github_transport=self.github,
             prepare_options={"runner_factory": prepare_tests._runner_factory(), "remote_url": self.remote.url},
             claude_options={"expected_sha256": claude_tests.sha256_file(cli)},
-            codex_options={"transport": fake_transport(*responses, record=self.codex_requests), "sleep": lambda s: None},
+            codex_options={"run": fake_codex_run(codex_events(codex_payload()), returncode=codex_exit, record=self.codex_calls)},
             summary_path=str(self.summary),
         )
         kwargs.update(overrides)
@@ -145,7 +154,7 @@ class EndToEndTests(LocalCase):
         self.assertIn("問題がないことを意味しない", document["review"]["summary"])
 
     def test_codex_failure_is_not_publishable(self):
-        document = self.run_local(responses=[(400, {"error": {"message": "bad request"}})])
+        document = self.run_local(codex_exit=1)
         self.assertFalse(document["publishable"])
         self.assertEqual(document["stages"]["claude"]["status"], "success")
         self.assertEqual(document["stages"]["codex"]["status"], "failed")
@@ -173,10 +182,12 @@ class CredentialBoundaryTests(LocalCase):
 
         self.assertEqual(len(self.codex_requests), 1)
         codex_seen = json.dumps(
-            [{"url": r["url"], "headers": r["headers"], "body": (r["body"] or b"").decode("utf-8")} for r in self.codex_requests]
+            [{**call, "input": (call["input"] or b"").decode("utf-8")} for call in self.codex_calls]
         )
-        self.assertIn(OPENAI_CANARY, codex_seen)
-        for canary in (GITHUB_CANARY, CLAUDE_CANARY, *FOREIGN_CANARIES.values()):
+        # The Codex CLI gets the sign-in directory, never a token or an API key.
+        for call in self.codex_calls:
+            self.assertEqual(call["env"]["CODEX_HOME"], str(self.codex_home))
+        for canary in ALL_CANARIES:
             self.assertNotIn(canary, codex_seen)
 
         github_seen = json.dumps([[m, u, h] for m, u, h in self.github.requests])
@@ -201,7 +212,7 @@ class CredentialBoundaryTests(LocalCase):
         env = {
             "AI_REVIEW_GITHUB_TOKEN": GITHUB_CANARY,
             "CLAUDE_CODE_OAUTH_TOKEN": CLAUDE_CANARY,
-            "OPENAI_API_KEY": OPENAI_CANARY,
+            "CODEX_HOME": str(self.codex_home),
             **FOREIGN_CANARIES,
         }
         argv = ["--repository", "acme/widgets", "--pull-request", "7", "--output-dir", str(self.out), "--claude-bin", "/bin/true"]
@@ -209,7 +220,8 @@ class CredentialBoundaryTests(LocalCase):
             self.assertEqual(local.main(argv, env=env), local.EXIT_OK)
         self.assertEqual(seen["github_token"], GITHUB_CANARY)
         self.assertEqual(seen["claude_token"], CLAUDE_CANARY)
-        self.assertEqual(seen["openai_key"], OPENAI_CANARY)
+        self.assertEqual(seen["codex_home"], self.codex_home)
+        self.assertNotIn(OPENAI_CANARY, json.dumps(seen, default=str))
         self.assertNotIn(FOREIGN_CANARIES["GITHUB_TOKEN"], json.dumps(seen, default=str))
 
     def test_generic_github_token_is_not_used(self):
@@ -219,11 +231,11 @@ class CredentialBoundaryTests(LocalCase):
             self.assertNotIn("Authorization", headers)
 
     def test_missing_ai_credentials_stop_before_any_network_access(self):
-        for missing in ("claude_token", "openai_key"):
-            with self.subTest(missing=missing):
+        for missing, value in (("claude_token", None), ("codex_home", None), ("codex_home", self.tmp / "no-sign-in")):
+            with self.subTest(missing=missing, value=value):
                 self.github.requests.clear()
                 with self.assertRaises(local.LocalError):
-                    self.run_local(**{missing: None})
+                    self.run_local(**{missing: value})
                 self.assertEqual(self.github.requests, [])
                 self.assertFalse(self.out.exists())
 

@@ -246,11 +246,12 @@ def _usage(document: dict, limits: limits_mod.Limits) -> list[str]:
             )
         )
     lines += [
-        "- 上限: Claude budget USD {b} / Claude max turns {t} / Codex max output tokens {o}".format(
+        "- 上限: Claude budget USD {b} / Claude max turns {t} / Codex timeout seconds {o}".format(
             b=code(limits.claude_max_budget_usd),
             t=code(str(limits.claude_max_turns)),
-            o=code(str(limits.codex_max_output_tokens)),
+            o=code(str(limits.codex_timeout_seconds)),
         ),
+        "- Codexはサブスクリプション（ChatGPT）枠で実行する。API従量課金は使わない。",
         "",
     ]
     return lines

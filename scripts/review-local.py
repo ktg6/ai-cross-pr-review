@@ -18,7 +18,10 @@ is passed to the single stage that needs it:
 
     AI_REVIEW_GITHUB_TOKEN   prepare (optional; unset = unauthenticated reads)
     CLAUDE_CODE_OAUTH_TOKEN  Claude primary review
-    OPENAI_API_KEY           Codex verification
+
+The Codex verification uses the Codex CLI's ChatGPT subscription sign-in
+(``codex login``) in ``CODEX_HOME`` (default ``~/.codex``). An API key is never
+read and an API-key sign-in is refused (ADR-0012).
 
 The bundle, git scratch space, raw provider responses and normalized stage
 results live in a private temporary directory that is removed on exit.
@@ -47,7 +50,6 @@ from lib import diff as diff_mod  # noqa: E402
 from lib import github as gh  # noqa: E402
 from lib import limits as limits_mod  # noqa: E402
 from lib import models as models_mod  # noqa: E402
-from lib import openai_api  # noqa: E402
 
 EXIT_OK = 0
 EXIT_UNEXPECTED = 1
@@ -55,7 +57,6 @@ EXIT_STOP = 2
 
 GITHUB_TOKEN_ENV = "AI_REVIEW_GITHUB_TOKEN"
 CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
-OPENAI_KEY_ENV = "OPENAI_API_KEY"
 
 # The local path never posts. The final document still records a valid mode.
 OUTPUT_MODE = "summary_only"
@@ -108,7 +109,6 @@ _CODEX_ERRORS = (
     bundle_mod.BundleError,
     limits_mod.LimitExceeded,
     models_mod.ModelNotAllowed,
-    openai_api.OpenAIError,
 )
 _PREPARE_ERRORS = (
     prepare_mod.PrepareError,
@@ -165,13 +165,14 @@ def review_local(
     output_dir: Path,
     github_token: str | None,
     claude_token: str | None,
-    openai_key: str | None,
+    codex_home: Path | None,
     claude_model: str = models_mod.DEFAULT_CLAUDE_MODEL,
     codex_model: str = models_mod.DEFAULT_CODEX_MODEL,
     claude_effort: str = models_mod.DEFAULT_CLAUDE_EFFORT,
     codex_effort: str = models_mod.DEFAULT_CODEX_EFFORT,
     policy_path: str = validate_mod.DEFAULT_POLICY_PATH,
     claude_bin: str = "claude",
+    codex_bin: str = "codex",
     limits: limits_mod.Limits = limits_mod.DEFAULT_LIMITS,
     github_transport: gh.Transport | None = None,
     prepare_options: dict | None = None,
@@ -183,7 +184,7 @@ def review_local(
 
     ``github_transport``, ``prepare_options``, ``claude_options`` and
     ``codex_options`` exist for tests (fake GitHub, local git remote, fake CLI
-    digest, fake Responses API). Credentials are never taken from them.
+    digest, fake Codex CLI). Credentials are never taken from them.
     """
     request = validate_mod.build_request(
         repository=repository,
@@ -201,8 +202,8 @@ def review_local(
     # would only produce a failed result after fetching the PR.
     if not claude_token:
         raise LocalError(f"{CLAUDE_TOKEN_ENV} is not set")
-    if not openai_key:
-        raise LocalError(f"{OPENAI_KEY_ENV} is not set")
+    if codex_home is None or not Path(codex_home).is_dir():
+        raise LocalError("CODEX_HOME is not a directory; sign in with `codex login` first")
     log(
         "request: repository={r} pr={n} claude={c} codex={x}".format(
             r=request["repository"], n=request["pr_number"], c=request["claude_model"], x=request["codex_model"]
@@ -277,7 +278,8 @@ def review_local(
                     schema_file=ROOT / "schemas" / "codex-review.schema.json",
                     model=request["codex_model"],
                     effort=request["codex_effort"],
-                    api_key=openai_key,
+                    codex_bin=codex_bin,
+                    codex_home=Path(codex_home),
                     limits=limits,
                     run_env={},
                     **(codex_options or {}),
@@ -289,7 +291,6 @@ def review_local(
                     invocation_file=codex_work / run_codex_mod.INVOCATION_NAME,
                     output_dir=scratch_dir / "codex-result",
                     limits=limits,
-                    token=openai_key,
                 )
             except Exception as err:  # noqa: BLE001 - recorded as a failed stage
                 log(f"codex stage failed: {_describe(err, _CODEX_ERRORS)}")
@@ -336,6 +337,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--codex-effort", default=models_mod.DEFAULT_CODEX_EFFORT, choices=models_mod.CODEX_EFFORTS)
     parser.add_argument("--policy-path", default=validate_mod.DEFAULT_POLICY_PATH)
     parser.add_argument("--claude-bin", default="claude", help="pinned Claude Code CLI (name on PATH or path)")
+    parser.add_argument("--codex-bin", default="codex", help="pinned Codex CLI signed in with ChatGPT (name on PATH or path)")
     return parser.parse_args(argv)
 
 
@@ -349,13 +351,14 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> int:
             output_dir=args.output_dir,
             github_token=env.get(GITHUB_TOKEN_ENV) or None,
             claude_token=env.get(CLAUDE_TOKEN_ENV) or None,
-            openai_key=env.get(OPENAI_KEY_ENV) or None,
+            codex_home=run_codex_mod.default_codex_home(env),
             claude_model=args.claude_model,
             codex_model=args.codex_model,
             claude_effort=args.claude_effort,
             codex_effort=args.codex_effort,
             policy_path=args.policy_path,
             claude_bin=resolve_claude_bin(args.claude_bin),
+            codex_bin=args.codex_bin,
         )
     except (
         LocalError,

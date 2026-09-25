@@ -6,8 +6,8 @@ Each scenario runs the real step scripts in the workflow's order:
     -> normalize -> finalize -> report -> publish
 
 GitHub is an in-memory transport, the Claude CLI is a fake executable, and the
-OpenAI Responses API is an injected transport. No network, no real credential,
-no real PR, and no reviewed code is ever executed.
+Codex CLI is an injected ``run`` function. No network, no real credential or
+sign-in, no real PR, and no reviewed code is ever executed.
 """
 
 from __future__ import annotations
@@ -28,11 +28,11 @@ from support import (  # noqa: E402
     CANARY_OPENAI,
     SNAPSHOT_ID,
     claim_review,
+    codex_events,
     codex_finding,
     codex_payload,
-    fake_transport,
+    fake_codex_run,
     make_bundle,
-    responses_envelope,
 )
 
 import test_publish_review as publish_tests  # noqa: E402
@@ -40,7 +40,6 @@ import test_review_result as claude_tests  # noqa: E402
 
 from lib import bundle as bundle_mod  # noqa: E402
 from lib import limits as limits_mod  # noqa: E402
-from lib import openai_api  # noqa: E402
 
 run_review = claude_tests.run_review
 normalize_review = claude_tests.normalize_review
@@ -59,6 +58,8 @@ GITHUB_CANARY_ENV = {
     "AI_REVIEW_READ_TOKEN": "canary-read-token-not-real-0001",
     "AI_REVIEW_COMMENT_TOKEN": COMMENT_TOKEN,
     "GH_TOKEN": CANARY_GITHUB,
+    # An API key in the environment must never reach the Codex CLI (ADR-0012).
+    "OPENAI_API_KEY": CANARY_OPENAI,
 }
 
 
@@ -76,7 +77,7 @@ class Pipeline:
         self.codex_result: Path | None = None
         self.claude_job = "skipped"
         self.codex_job = "skipped"
-        self.codex_requests: list[dict] = []
+        self.codex_calls: list[dict] = []
         self.claude_record: dict | None = None
         self.final: dict | None = None
         self.final_dir = self.tmp / "final"
@@ -121,9 +122,16 @@ class Pipeline:
 
     # -- stage 2: verification ---------------------------------------------------
 
-    def codex(self, *, payload=None, responses=None, model="gpt-5.6-sol", claude_result: Path | None = None):
-        responses = responses if responses is not None else [(200, responses_envelope(payload if payload is not None else codex_payload()))]
+    @property
+    def codex_requests(self) -> list[dict]:
+        """The ``codex exec`` calls, i.e. the times the model was called."""
+        return [call for call in self.codex_calls if call["argv"][1:2] == ["exec"]]
+
+    def codex(self, *, payload=None, stream=None, returncode=0, model="gpt-5.6-sol", claude_result: Path | None = None):
+        stream = stream if stream is not None else codex_events(payload if payload is not None else codex_payload())
         workdir = self.tmp / "codex-work"
+        codex_home = self.tmp / "codex-home"
+        codex_home.mkdir(exist_ok=True)
         source = claude_result or self.claude_result
         try:
             with mock.patch.dict(os.environ, GITHUB_CANARY_ENV):
@@ -134,9 +142,8 @@ class Pipeline:
                     prompt_file=ROOT / "prompts" / "codex-verify.md",
                     schema_file=ROOT / "schemas" / "codex-review.schema.json",
                     model=model,
-                    api_key=CANARY_OPENAI,
-                    transport=fake_transport(*responses, record=self.codex_requests),
-                    sleep=lambda seconds: None,
+                    codex_home=codex_home,
+                    run=fake_codex_run(stream, returncode=returncode, record=self.codex_calls),
                     run_env={"GITHUB_RUN_ID": "42"},
                 )
             normalize_codex.normalize(
@@ -145,7 +152,6 @@ class Pipeline:
                 raw_file=workdir / run_codex.RAW_RESULT_NAME,
                 invocation_file=workdir / run_codex.INVOCATION_NAME,
                 output_dir=self.tmp / "codex-out",
-                token=CANARY_OPENAI,
             )
         except Exception as err:
             self.codex_job = "failure"
@@ -305,11 +311,12 @@ class PrCommentTests(PipelineCase):
         self.assertNotIn(claude_tests.CANARY_OAUTH, json.dumps(pipe.claude_record["argv"]))
 
         self.assertEqual(len(pipe.codex_requests), 1)
-        sent = pipe.codex_requests[0]
-        blob = json.dumps(sent["headers"]) + sent["body"].decode("utf-8")
-        for canary in (*GITHUB_CANARY_ENV.values(), COMMENT_TOKEN):
-            self.assertNotIn(canary, blob)
-        self.assertEqual(sent["headers"]["Authorization"], f"Bearer {CANARY_OPENAI}")
+        for call in pipe.codex_calls:
+            for name in GITHUB_CANARY_ENV:
+                self.assertNotIn(name, call["env"])
+            blob = json.dumps({**call, "input": call["input"].decode("utf-8") if call["input"] else None})
+            for canary in (*GITHUB_CANARY_ENV.values(), COMMENT_TOKEN):
+                self.assertNotIn(canary, blob)
 
     def test_the_publisher_holds_no_ai_credential(self):
         pipe = self.pipeline()
@@ -350,11 +357,11 @@ class FailureTests(PipelineCase):
         self.assertIn("この実行は完了しなかった", summary)
         self.assertIn("not-publishable", summary)
 
-    def test_codex_http_failure(self):
+    def test_codex_cli_failure(self):
         pipe = self.pipeline()
         pipe.claude()
         with self.assertRaises(StageFailure):
-            pipe.codex(responses=[(500, {"error": "boom"})])
+            pipe.codex(returncode=1)
         pipe.finalize()
         self.assertEqual(pipe.final["stages"]["codex"]["status"], "failed")
         self.assertEqual(pipe.final["stages"]["claude"]["status"], "success")
@@ -363,23 +370,21 @@ class FailureTests(PipelineCase):
         self.assertEqual(pipe.final["review"]["adopted"], [])
         self.assertEqual(len(pipe.final["review"]["deferred"]), 1)
 
-    def test_codex_incomplete_response(self):
+    def test_codex_failed_turn(self):
         pipe = self.pipeline()
         pipe.claude()
-        incomplete = responses_envelope(codex_payload(), status="incomplete", incomplete_details={"reason": "max_output_tokens"})
+        failed = codex_events(codex_payload(), completed=False) + b'{"type": "turn.failed", "error": {"message": "usage limit"}}\n'
         with self.assertRaises(StageFailure):
-            pipe.codex(responses=[(200, incomplete)])
+            pipe.codex(stream=failed)
         pipe.finalize()
         self.assert_nothing_is_posted(pipe)
 
-    def test_codex_refusal(self):
+    def test_codex_tool_attempt_is_a_failure(self):
         pipe = self.pipeline()
         pipe.claude()
-        refusal = responses_envelope(
-            "", output=[{"type": "message", "content": [{"type": "refusal", "refusal": "no"}]}]
-        )
+        acted = codex_events(codex_payload(), items=[{"type": "command_execution", "command": "cat ~/.codex/auth.json"}])
         with self.assertRaises(StageFailure):
-            pipe.codex(responses=[(200, refusal)])
+            pipe.codex(stream=acted)
         pipe.finalize()
         self.assert_nothing_is_posted(pipe)
 
@@ -541,7 +546,7 @@ class ContextAndContentTests(PipelineCase):
             codex_finding(path="assets/logo.png"),
             codex_finding(path="src/app.py"),
         ]))
-        sent = json.loads(pipe.codex_requests[0]["body"])["input"][0]["content"][0]["text"]
+        sent = pipe.codex_requests[0]["input"].decode("utf-8")
         # The excluded file is listed as excluded (so it cannot be cited) but has no patch.
         self.assertIn('"excluded": "forbidden_filename"', sent)
         self.assertNotIn("diff --git a/.env", sent)
@@ -556,17 +561,18 @@ class ContextAndContentTests(PipelineCase):
         pipe = self.pipeline()
         pipe.run_all()
         claude_argv = json.dumps(pipe.claude_record["argv"])
-        codex_body = json.loads(pipe.codex_requests[0]["body"])
+        codex_call = pipe.codex_requests[0]
         self.assertNotIn("Ignore previous instructions", claude_argv)
-        self.assertNotIn("Ignore previous instructions", codex_body["instructions"])
+        self.assertNotIn("Ignore previous instructions", json.dumps(codex_call["argv"]))
+        self.assertNotIn("Ignore previous instructions", (ROOT / "prompts" / "codex-verify.md").read_text("utf-8"))
         self.assertIn("Ignore previous instructions", pipe.claude_record["stdin"])
-        self.assertIn("Ignore previous instructions", codex_body["input"][0]["content"][0]["text"])
+        self.assertIn("Ignore previous instructions", codex_call["input"].decode("utf-8"))
 
     def test_both_models_receive_the_same_snapshot(self):
         pipe = self.pipeline()
         pipe.run_all()
         claude_input = pipe.claude_record["stdin"]
-        codex_input = json.loads(pipe.codex_requests[0]["body"])["input"][0]["content"][0]["text"]
+        codex_input = pipe.codex_requests[0]["input"].decode("utf-8")
         diff = bundle_mod.load_bundle(pipe.bundle_dir).diff.decode("utf-8")
         self.assertIn(diff, claude_input)
         self.assertIn(diff, codex_input)
@@ -581,7 +587,7 @@ class ContextAndContentTests(PipelineCase):
         pipe.run_all()
         stages = pipe.final["stages"]
         self.assertEqual((stages["claude"]["model_requested"], stages["claude"]["model_reported"]), ("claude-opus-5", "claude-opus-5"))
-        self.assertEqual((stages["codex"]["model_requested"], stages["codex"]["model_reported"]), ("gpt-5.6-sol", "gpt-5.6-sol-2026-04-24"))
+        self.assertEqual((stages["codex"]["model_requested"], stages["codex"]["model_reported"]), ("gpt-5.6-sol", None))
 
 
 class PolicyAndForkTests(PipelineCase):
@@ -596,7 +602,7 @@ class PolicyAndForkTests(PipelineCase):
         self.assertEqual(document["snapshot"]["policy_source"], "central_default")
         self.assertFalse(document["snapshot"]["policy_present"])
         pipe.codex()
-        sent = json.loads(pipe.codex_requests[0]["body"])["input"][0]["content"][0]["text"]
+        sent = pipe.codex_requests[0]["input"].decode("utf-8")
         self.assertIn("source: central_default", sent)
         self.assertIn("DEFAULT REVIEW POLICY", sent)
         final = pipe.finalize()
@@ -617,7 +623,9 @@ class PolicyAndForkTests(PipelineCase):
         self.assertIn("fork: `true`", pipe.report())
         # Nothing about the fork widens what either AI can do.
         self.assertNotIn("--dangerously", json.dumps(pipe.claude_record["argv"]))
-        self.assertEqual(json.loads(pipe.codex_requests[0]["body"])["tools"], [])
+        codex_argv = pipe.codex_requests[0]["argv"]
+        self.assertEqual(codex_argv[codex_argv.index("--sandbox") + 1], "read-only")
+        self.assertIn("shell_tool", codex_argv)
         for name in GITHUB_CANARY_ENV:
             self.assertNotIn(name, pipe.claude_record["env"])
 
@@ -658,7 +666,7 @@ class TargetRepositoryNeedsNoWorkflowTests(PipelineCase):
         pipe.bundle_dir = real_bundle
         pipe.claude_result = pipe.codex_result = None
         pipe.claude_job = pipe.codex_job = "skipped"
-        pipe.codex_requests = []
+        pipe.codex_calls = []
         pipe.claude_record = None
         pipe.final = None
         pipe.final_dir = self.tmp / "final"

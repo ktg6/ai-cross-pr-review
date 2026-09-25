@@ -128,7 +128,6 @@ jobs:
           read_token_expires_on: ${{ vars.AI_REVIEW_READ_TOKEN_EXPIRES_ON }}
           comment_token_expires_on: ${{ vars.AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON }}
           claude_token_expires_on: ${{ vars.AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON }}
-          openai_key_expires_on: ${{ vars.AI_REVIEW_OPENAI_KEY_EXPIRES_ON }}
 
   prepare:
     name: Prepare review bundle
@@ -218,7 +217,10 @@ jobs:
   codex_review:
     name: Codex verification review
     needs: [validate_request, prepare, claude_review]
-    runs-on: ubuntu-24.04
+    # ChatGPTサブスクリプションのsign-in（CODEX_HOMEのauth.json）を保持する、中央repository
+    # 専用のself-hosted runnerで実行する（ADR-0012）。auth.jsonはCLIが更新するため、
+    # 1つのauth.jsonを使うrunnerは1台だけとし、jobを直列に処理させる。
+    runs-on: [self-hosted, ai-review-codex]
     timeout-minutes: 20
     # GitHub権限を一切持たない。一次レビュー結果はuntrusted dataとして扱う。
     # 中央repositoryのcheckoutにだけ使うread権限。GITHUB_TOKENは中央repositoryにしか届かず、
@@ -252,7 +254,6 @@ jobs:
           output_dir: ${{ runner.temp }}/ai-review-codex-result
           codex_model: ${{ needs.validate_request.outputs.codex_model }}
           codex_effort: ${{ needs.validate_request.outputs.codex_effort }}
-          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
 
       - name: Upload verification result
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

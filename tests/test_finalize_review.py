@@ -144,13 +144,14 @@ class BucketingTests(FinalizeCase):
         self.assertEqual(document["stages"]["claude"]["model_requested"], "claude-opus-5")
         self.assertEqual(document["stages"]["claude"]["model_reported"], "claude-opus-5")
         self.assertEqual(document["stages"]["codex"]["model_requested"], "gpt-5.6-sol")
-        self.assertEqual(document["stages"]["codex"]["model_reported"], "gpt-5.6-sol-2026-04-24")
+        # The Codex CLI does not report the served model; it stays null (ADR-0012).
+        self.assertIsNone(document["stages"]["codex"]["model_reported"])
 
     def test_usage_is_carried_into_the_stages(self):
         document, _ = self.finalize()
         claude, codex = document["stages"]["claude"], document["stages"]["codex"]
         self.assertEqual((claude["input_tokens"], claude["output_tokens"], claude["cost_usd"]), (1500, 300, 0.0123))
-        # The Responses API reports tokens but no cost.
+        # The Codex CLI reports tokens but no cost.
         self.assertEqual((codex["input_tokens"], codex["output_tokens"], codex["cost_usd"]), (1000, 200, None))
 
     def test_a_failed_stage_reports_no_usage(self):
