@@ -46,7 +46,6 @@ INPUTS = (
 SECRETS = {
     "AI_REVIEW_READ_TOKEN": "prepare",
     "CLAUDE_CODE_OAUTH_TOKEN": "claude_review",
-    "OPENAI_API_KEY": "codex_review",
     "AI_REVIEW_COMMENT_TOKEN": "comment",
 }
 
@@ -244,10 +243,23 @@ class PermissionAndSecretTests(unittest.TestCase):
     def test_secrets_are_passed_only_as_action_inputs_never_via_env_or_run(self):
         for match in re.finditer(r"secrets\.[A-Z_]+", self.workflow):
             line = self.workflow[: match.start()].rsplit("\n", 1)[-1]
-            self.assertRegex(line, r"^\s+(github_token|claude_code_oauth_token|openai_api_key): ")
+            self.assertRegex(line, r"^\s+(github_token|claude_code_oauth_token): ")
         self.assertNotIn("secrets: inherit", self.workflow)
         self.assertNotIn("toJSON(secrets", self.workflow)
         self.assertNotRegex(self.workflow, r"(?m)^\s+env:")
+
+    def test_codex_runs_on_the_signed_in_self_hosted_runner_and_holds_no_secret(self):
+        # ADR-0012: the subscription sign-in is kept on a dedicated persistent
+        # runner. No API key exists anywhere in the workflow.
+        self.assertRegex(self.jobs["codex_review"], r"(?m)^    runs-on: \[self-hosted, ai-review-codex\]$")
+        self.assertNotIn("secrets.", self.jobs["codex_review"])
+        self.assertNotIn("OPENAI_API_KEY", self.workflow)
+        self.assertNotIn("openai_api_key", self.workflow)
+        for name, body in self.jobs.items():
+            if name != "codex_review":
+                with self.subTest(job=name):
+                    self.assertRegex(body, r"(?m)^    runs-on: ubuntu-24\.04$")
+                    self.assertNotIn("self-hosted", body)
 
     def test_ai_jobs_receive_no_github_credential_input(self):
         for name in ("claude_review", "codex_review"):
@@ -295,7 +307,6 @@ class PermissionAndSecretTests(unittest.TestCase):
             "read_token_expires_on": "AI_REVIEW_READ_TOKEN_EXPIRES_ON",
             "comment_token_expires_on": "AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON",
             "claude_token_expires_on": "AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON",
-            "openai_key_expires_on": "AI_REVIEW_OPENAI_KEY_EXPIRES_ON",
         }
         found = re.findall(r"(?m)^\s+([a-z_]+): \$\{\{ vars\.([A-Z_]+) \}\}$", self.workflow)
         self.assertEqual(dict(found), expected)
@@ -373,12 +384,13 @@ class RuntimeActionTests(unittest.TestCase):
             "Check operational health": set(),
             "Prepare review bundle": {"GITHUB_TOKEN"},
             "Run read-only primary review": {"CLAUDE_CODE_OAUTH_TOKEN"},
-            "Run verification review": {"OPENAI_API_KEY"},
+            # ADR-0012: the ChatGPT sign-in lives on the self-hosted runner.
+            "Run verification review": set(),
             "Finalize review": set(),
             "Report to job summary": set(),
             "Publish review comment": {"GITHUB_TOKEN"},
         }
-        every = {"GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"}
+        every = {"GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"}
         for step, allowed in expectations.items():
             body = step_body(self.action, step)
             for credential in every:

@@ -12,7 +12,7 @@ GitHub Actions 上で、Claude が初期レビューを行い、Codex が同一�
     ├── validate_request  入力の allowlist 検証
     ├── prepare           対象 PR の snapshot を固定して取得（read token）
     ├── claude_review     一次レビュー（Claude、GitHub credential なし）
-    ├── codex_review      再検証（Codex、GitHub credential なし）
+    ├── codex_review      再検証（Codex CLI、self-hosted runner、GitHub credential なし）
     ├── finalize          検証・突合・無害化・整形
     ├── report            Job Summary に表示、artifact を保存
     └── comment           pr_comment のときだけ PR にコメント（comment token）
@@ -53,14 +53,15 @@ GitHub Actions 上で、Claude が初期レビューを行い、Codex が同一�
 
 ### 1. Secret を登録する
 
-中央実行 repository の Actions Secret に、次の 4 つを登録する。値はここへ書かない。
+中央実行 repository の Actions Secret に、次の 3 つを登録する。値はここへ書かない。
 
 | Secret 名 | 用途 | 渡される job |
 |---|---|---|
 | `AI_REVIEW_READ_TOKEN` | 対象 repository の metadata・contents・pull requests の read | `prepare` だけ |
 | `AI_REVIEW_COMMENT_TOKEN` | 対象 repository の pull requests の write | `comment` だけ |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code の認証（`claude setup-token` で発行） | `claude_review` だけ |
-| `OPENAI_API_KEY` | OpenAI Responses API の認証 | `codex_review` だけ |
+
+Codex の再検証は、ChatGPT アカウントで認証した Codex CLI で実行する。API key による従量課金には切り替えず、`OPENAI_API_KEY` も登録しない。利用できるプラン・クレジットは runner のアカウントに依存する。認証は次の self-hosted runner に置く。
 
 `summary_only` だけを使う場合、`AI_REVIEW_COMMENT_TOKEN` は不要である。
 
@@ -75,7 +76,24 @@ read token と comment token は、対象 repository に限定した fine-graine
 | `AI_REVIEW_READ_TOKEN_EXPIRES_ON` | `AI_REVIEW_READ_TOKEN` |
 | `AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON` | `AI_REVIEW_COMMENT_TOKEN` |
 | `AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON` | `CLAUDE_CODE_OAUTH_TOKEN` |
-| `AI_REVIEW_OPENAI_KEY_EXPIRES_ON` | `OPENAI_API_KEY`（期限のない key には rotation 期日を設定する） |
+
+### 1-2. Codex 用の self-hosted runner を用意する
+
+`codex_review` job だけは、ラベル `self-hosted` と `ai-review-codex` を持つ self-hosted runner で動く。それ以外の job は GitHub-hosted runner で動く。
+
+1. 中央実行 repository 専用の runner を 1 台登録し、ラベル `ai-review-codex` を付ける。他の repository や組織の runner group と共有しない。
+2. runner に Python 3.11 以上と、Codex CLI `0.155.1`（`scripts/lib/limits.py` の `CODEX_CLI_VERSION`）を入れ、runner の実行ユーザーの `PATH` から `codex` を実行できるようにする。
+3. runner の実行ユーザーで `codex login` を実行し、ChatGPT アカウントで sign in する。認証は `CODEX_HOME`（未設定なら `~/.codex`）に保存される。
+4. `codex login status` が `Logged in using ChatGPT` を返すことを確認する。
+5. runner のアカウントで、利用するプラン・クレジット設定と Codex の利用可否を別途確認する。`codex login status` は契約プランを表示しない。
+
+注意:
+
+- `CODEX_HOME` の `auth.json` はパスワードと同等である。runner のディスクを保護し、ログや artifact に出さない。Codex CLI が実行中に更新するため、同じ `auth.json` を複数の runner で共有しない（runner 1 台が job を 1 件ずつ処理する）。
+- API key で sign in している場合や、sign in していない場合、`codex_review` は Codex を呼ばずに失敗する。API 従量課金への切り替えは行わない。
+- CLI のイベント検査は事後検知である。tool 呼び出しを検出した場合は結果を破棄するが、実行済みの読み取りや通信は取り消せない。runner は専用にし、workflow 変更権限を限定する。
+- サブスクリプションの利用上限に達した場合、`codex_review` は失敗として記録され、PR には投稿されない。ChatGPT 側で追加クレジットを購入している場合は、その扱いは ChatGPT の契約に従う。
+- Codex CLI の version を上げる場合は、`CODEX_CLI_VERSION`、runner の CLI、ADR-0012 の確認内容をそろえて更新する。
 
 ### 2. 実行する
 
@@ -96,7 +114,7 @@ read token と comment token は、対象 repository に限定した fine-graine
 ### 3. 結果を確認する
 
 - 実行の Job Summary に、最終結果が表示される。
-- Job Summary には、各 stage の使用量（token 数、Claude の費用）と、適用中の上限も表示される。これらは PR コメントには載らない。
+- Job Summary には、各 stage の使用量（token 数、Claude の費用）と、適用中の上限も表示される。Codex の実使用モデルは CLI が報告しないため `-` と表示される。これらは PR コメントには載らない。
 - Job Summary の「運用チェック」に、Secret の期限と、選択したモデルの公式ドキュメントでの確認日が表示される。警告が出てもレビューは止まらない。
 - 詳細な Markdown と JSON は、`ai-review-final-*` という名前の artifact に保存される（保持 7 日）。
 - `pr_comment` を選び、投稿できる状態のとき、対象 PR に定型のコメントが 1 件付く。同じ snapshot への再実行は、そのコメントを更新する。
@@ -118,13 +136,14 @@ read token と comment token は、対象 repository に限定した fine-graine
 - 投稿は、決定論的な publisher（`comment` job）だけが行う。
 - Claude の結果と Codex の結果は、prepare job が出力した snapshot の値と突合される。一致しない結果は、Codex の処理にも投稿にも使われない。
 - 認証情報らしき値は出力から除去され、`.env` や鍵などの path、バイナリの内容は AI に渡されない。
-- Claude Code CLI と外部 Action は、固定した version または full commit SHA で使う。Codex には tool を渡さず、応答を保存しない設定（`store: false`）で呼び出す。
+- Claude Code CLI、Codex CLI、外部 Action は、固定した version または full commit SHA で使う。
+- Codex CLI は、shell・Web 検索・MCP・plugin などの tool をすべて無効にし、読み取り専用 sandbox、空の作業 directory、ユーザー設定と project docs を読まない設定で実行する。それでも tool の呼び出しが記録された場合は、出力を捨てて失敗とする。
 
 ### 運用上の注意
 
 - 対象の PR の diff と、レビュー結果は、中央実行 repository の Job Summary と artifact に残る。中央 repository は非公開にし、閲覧できる人を、対象 repository を閲覧できる人と同等以下に保つこと。
-- 対象 repository のコードは、Anthropic と OpenAI に送信される。対象組織の外部 AI 利用方針に従い、許可された repository だけを起動すること。
-- モデルの ID は公式ドキュメントの記載から転記しており、実 API での動作確認はまだ行っていない。初回の実行で、モデルが受理されない場合がある。その場合は失敗として表示される。
+- 対象 repository のコードは、Anthropic と OpenAI（ChatGPT アカウント経由）に送信される。対象組織の外部 AI 利用方針に従い、許可された repository だけを起動すること。
+- モデルの ID は公式ドキュメントの記載から転記している。Codex CLI と ChatGPT sign in で動作を確認したのは `gpt-5.6-sol` だけである。他のモデルは、契約プランによっては受理されない場合がある。その場合は失敗として表示される。
 - 各モデル ID には、公式ドキュメントで確認した日付を `scripts/lib/models.py` に記録している。確認日が未記録か 90 日を超えると、運用チェックが再確認を促す。再確認では、公式ドキュメント、`models.py`、workflow の選択肢、ADR の References、テストの順に更新する。
 
 ## 入力制限
@@ -147,6 +166,6 @@ Python 3.11 以上と標準ライブラリだけを使う。runtime の依存は
 python3 -m unittest discover -s tests
 ```
 
-テストでは、GitHub、Claude、OpenAI をすべて mock にしている。実際の Secret も、実際の PR も使わない。
+テストでは、GitHub、Claude、Codex CLI をすべて mock にしている。実際の Secret、sign in、PR は使わない。
 
 設計の背景は `docs/plan/` の Plan と、`docs/adr/` の ADR にある。作業ルールは `AGENTS.md` にまとまっている。

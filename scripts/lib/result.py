@@ -280,7 +280,6 @@ def _validate_model_run(
     *,
     expected_keys: tuple[str, ...],
     provider: str,
-    endpoint: str | None = None,
     cli_version: str | None = None,
     model_validator=None,
     effort_validator=None,
@@ -288,8 +287,6 @@ def _validate_model_run(
     run = _exact_keys(payload, expected_keys, "stage result.run")
     if run["provider"] != provider:
         raise ResultError("stage result.run.provider is unexpected")
-    if endpoint is not None and run["endpoint"] != endpoint:
-        raise ResultError("stage result.run.endpoint is unexpected")
     if cli_version is not None and run["cli_version"] != cli_version:
         raise ResultError("stage result.run.cli_version is unexpected")
     try:
@@ -412,16 +409,16 @@ def validate_normalized_codex_document(
         limits,
         expected_keys=limits_mod.CODEX_RUN_KEYS,
         provider=limits_mod.CODEX_PROVIDER,
-        endpoint=limits_mod.CODEX_API_PATH,
+        cli_version=limits_mod.CODEX_CLI_VERSION,
         model_validator=models_mod.validate_codex_model,
         effort_validator=models_mod.validate_codex_effort,
     )
-    if run["store"] is not False:
-        raise ResultError("stage result.run.store must be false")
+    # Only a ChatGPT subscription sign-in is accepted (ADR-0012).
+    if run["auth_mode"] != limits_mod.CODEX_AUTH_MODE:
+        raise ResultError("stage result.run.auth_mode is not a subscription sign-in")
     if run["status"] != "completed":
         raise ResultError("stage result.run.status is not completed")
-    run["store"] = False
-    run["response_id"] = _optional_text(run["response_id"], "stage result.run.response_id", 256)
+    run["thread_id"] = _optional_text(run["thread_id"], "stage result.run.thread_id", 256)
     for field in ("input_tokens", "output_tokens"):
         run[field] = _nonnegative_int(run[field], f"stage result.run.{field}", nullable=True)
 

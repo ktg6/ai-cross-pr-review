@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -282,14 +283,14 @@ def codex_document(**overrides) -> dict:
         "snapshot": snapshot_block(),
         "run": {
             "provider": limits_mod.CODEX_PROVIDER,
-            "endpoint": limits_mod.CODEX_API_PATH,
+            "cli_version": limits_mod.CODEX_CLI_VERSION,
+            "auth_mode": limits_mod.CODEX_AUTH_MODE,
             "model_requested": "gpt-5.6-sol",
-            "model_reported": "gpt-5.6-sol-2026-04-24",
+            "model_reported": None,
             "effort": "high",
             "tools_enabled": False,
-            "store": False,
             "run_id": "123456",
-            "response_id": "resp_test",
+            "thread_id": "thread-test",
             "status": "completed",
             "input_tokens": 1000,
             "output_tokens": 200,
@@ -302,31 +303,50 @@ def codex_document(**overrides) -> dict:
     return document
 
 
-def responses_envelope(payload: object, **overrides) -> dict:
-    """An OpenAI Responses API response object carrying structured output."""
-    envelope = {
-        "id": "resp_test",
-        "object": "response",
-        "status": "completed",
-        "model": "gpt-5.6-sol-2026-04-24",
-        "output": [
-            {"type": "reasoning", "id": "rs_test", "summary": []},
+def codex_events(payload: object, *, items: list[dict] | None = None, usage: dict | None = None, completed: bool = True) -> bytes:
+    """A ``codex exec --json`` event stream whose final message is ``payload``."""
+    text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    events: list[dict] = [{"type": "thread.started", "thread_id": "thread-test"}, {"type": "turn.started"}]
+    for index, item in enumerate(items or []):
+        events.append({"type": "item.completed", "item": {"id": f"item_x{index}", **item}})
+    events.append({"type": "item.completed", "item": {"id": "item_msg", "type": "agent_message", "text": text}})
+    if completed:
+        events.append(
             {
-                "type": "message",
-                "id": "msg_test",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False),
-                    }
-                ],
-            },
-        ],
-        "usage": {"input_tokens": 1000, "output_tokens": 200},
-    }
-    envelope.update(overrides)
-    return envelope
+                "type": "turn.completed",
+                "usage": usage if usage is not None else {"input_tokens": 1000, "cached_input_tokens": 0, "output_tokens": 200},
+            }
+        )
+    return b"".join(json.dumps(event, ensure_ascii=False).encode("utf-8") + b"\n" for event in events)
+
+
+def fake_codex_run(
+    stdout: bytes | Exception = b"",
+    *,
+    returncode: int = 0,
+    stderr: bytes = b"",
+    version: str = "codex-cli " + limits_mod.CODEX_CLI_VERSION,
+    login_status: str = "Logged in using ChatGPT",
+    record: list | None = None,
+):
+    """Replace ``subprocess.run`` for the Codex CLI.
+
+    ``--version`` and ``login status`` get canned answers; ``exec`` returns
+    ``stdout``. Every call is recorded with its argv, env, cwd and stdin.
+    """
+
+    def run(argv, **kwargs):
+        if record is not None:
+            record.append({"argv": list(argv), "env": dict(kwargs.get("env") or {}), "cwd": kwargs.get("cwd"), "input": kwargs.get("input")})
+        if argv[1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, (version + "\n").encode(), b"")
+        if argv[1:] == ["login", "status"]:
+            return subprocess.CompletedProcess(argv, 0, b"", (login_status + "\n").encode())
+        if isinstance(stdout, Exception):
+            raise stdout
+        return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+    return run
 
 
 def fake_transport(*responses, record: list | None = None):

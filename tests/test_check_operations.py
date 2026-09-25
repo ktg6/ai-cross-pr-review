@@ -138,12 +138,13 @@ class OutputTests(unittest.TestCase):
         self.assertIn("`expired`", summary)
         self.assertIn("`invalid`", summary)
         self.assertIn("`expiring`", summary)
-        self.assertIn("`unset`", summary)
         # expired, invalid, expiring, plus the unrecorded Claude model date.
         self.assertEqual(annotations.count("::warning "), 4)
 
     def test_annotations_are_single_line_workflow_commands(self):
-        _code, annotations, _summary = self.run_main("--read-token-expires-on", days(-1))
+        _code, annotations, summary = self.run_main("--read-token-expires-on", days(-1))
+        # The other credentials carry no date; that is shown, not warned.
+        self.assertIn("`unset`", summary)
         for line in annotations.splitlines():
             self.assertTrue(line.startswith("::warning title=AI Cross Review operations::"), line)
             self.assertEqual(line.count("::"), 2)
@@ -154,13 +155,12 @@ class OutputTests(unittest.TestCase):
             "--read-token-expires-on", far,
             "--comment-token-expires-on", far,
             "--claude-token-expires-on", far,
-            "--openai-key-expires-on", far,
         )
         self.assertEqual(code, ops.EXIT_OK)
         # Only the Claude model's unrecorded verification date remains.
         claude = models_mod.model_entry("claude-opus-5")
         self.assertEqual(annotations.count("::warning "), 0 if claude.verified_on else 1)
-        self.assertEqual(summary.count("`ok`"), 6 if claude.verified_on else 5)
+        self.assertEqual(summary.count("`ok`"), 5 if claude.verified_on else 4)
 
     def test_the_step_holds_no_credential(self):
         source = (support.ROOT / "scripts" / "check-operations.py").read_text("utf-8")

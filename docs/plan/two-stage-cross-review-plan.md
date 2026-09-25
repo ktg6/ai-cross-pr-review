@@ -36,7 +36,7 @@ Consumer repository
         ├── validate_request   入力allowlist検証
         ├── prepare            対象repositoryのPR snapshot取得
         ├── claude_review      一次レビュー（Claude）
-        ├── codex_review       再検証（Codex / OpenAI Responses API）
+        ├── codex_review       再検証（Codex / Phase 8以降はCodex CLI・ChatGPT認証）
         ├── finalize           schema検証・snapshot一致検証・無害化・整形
         ├── report             Job Summary表示・artifact保存
         └── comment            条件付きPRコメント（pr_commentのみ）
@@ -136,6 +136,8 @@ review policyが対象repositoryに存在しない場合は、中央側の固定
 - 応答の`status`が`completed`でない場合、`incomplete_details`がある場合、`refusal` content itemがある場合はいずれも失敗として扱う。
 
 モデルIDは公式のModelsドキュメントで検証したものだけをallowlistへ入れる。ライフサイクル更新は「公式docsで確認 → allowlist更新 → ADRのReferences更新 → テスト更新」の順で行い、未確認のIDを追加しない。
+
+> Phase 8で、Codexの実行方式はResponses API（API key、従量課金）からCodex CLI（ChatGPTアカウントでのsign-in、self-hosted runner）へ置き換える。tool全無効・構造化出力・境界マーカー・allowlistは維持する。詳細はPhase 8とADR-0012を参照。
 
 ### 4.6 認証と権限
 
@@ -259,6 +261,22 @@ Phase 7で実装する際の前提は次のとおり。
 - **作成するADR**: 0011（Proposedで作成し、承認後Accepted）。
 - **Security considerations**: ローカル経路にGitHub書き込みの呼び出しを置かない（静的検査とread-only transportの二重）。tokenはargvに現れない。AI stageへGitHub tokenを渡さず、Claude CLIの環境は既存の最小環境（利用者の`HOME`・設定を読まない）を使う。raw provider responseを残さない。PRコード・hooks・Agent設定を実行しない点は既存`prepare`のまま。
 - **Tests**: 固定remote・fake GitHub・fake Claude CLI・fake Responses APIによるend-to-end、tokenの到達範囲（canary）、GitHub requestがGETだけであること、`publish-review.py`がimportされないこと、token用のCLI引数がないこと、AI tokenの事前検査、stage失敗時のexit codeと最終結果、出力directoryの拒否条件、出力に中間ファイルとtokenが残らないこと。
+- **Completion criteria**: `python3 -m unittest discover -s tests`が成功する。
+
+### Phase 8：CodexのChatGPT認証による実行
+
+- **Goal**: Codexの再検証を、API keyではなくChatGPTアカウントの認証で実行する。Plusプランには限定しない。API従量課金への自動フォールバックは設けず、利用上限に達した場合は失敗として停止する。認証状態から契約プランや残り枠は判定しない。
+- **実装するもの**:
+  - `scripts/run-codex-review.py`を、固定versionのCodex CLI（`codex exec`）を呼ぶadapterへ置き換える。実行前に`codex --version`と`codex login status`（`Logged in using ChatGPT`）を検査し、一致しなければモデルを呼ばずに停止する。
+  - tool系featureの無効化、Web検索の無効化、read-only sandbox、空の作業directory、ユーザー設定・rules・project docsの不読込、`--ephemeral`、`model_instructions_file`による固定契約、`--output-schema`を固定argvで指定する。環境変数は最小限とし、API keyとGitHub tokenを渡さない。
+  - `--json`のevent streamを検査し、`agent_message` / `reasoning` / `error`以外のitem、`turn.failed`、完了しないturnを失敗とする。stdoutは逐次読み取りで4 MiB、stderrは64 KiBで打ち切り、timeout・上限超過時はCLIラッパーと子プロセスを同一プロセスグループごと停止する。
+  - 実行記録を`provider: openai-codex-cli`、`cli_version`、`auth_mode: chatgpt`、`thread_id`へ変更し、`finalize`で検証する。`FRAMEWORK_VERSION`を上げる。
+  - workflowの`codex_review` jobをself-hosted runner（`[self-hosted, ai-review-codex]`）で実行し、`OPENAI_API_KEY` Secretと`AI_REVIEW_OPENAI_KEY_EXPIRES_ON`を削除する。
+  - ローカルCLIのCodex stageを、手元の`CODEX_HOME`のsign-inへ切り替える。
+- **実装しないもの**: API keyへのフォールバック、GitHub-hosted runnerでの`auth.json`の復元・書き戻し、Business / Enterprise向けアクセストークン、runnerの構築自動化、Claude側の変更。
+- **作成するADR**: 0012（Supersedes ADR-0007。Proposedで作成し、承認後Accepted）。
+- **Security considerations**: `auth.json`はself-hosted runnerだけに置き、workflow・Secret・artifact・ログへ出さない。runnerは中央repository専用とし、1つの`auth.json`を1台で直列に使う。tool呼び出しが記録された出力は破棄するが、事後検知では実行済みの読み取りや通信は取り消せない。PR由来データはstdinだけで渡し、argvへ含めない。
+- **Tests**: fake Codex CLI（`run`の差し替え）による固定argv・最小環境・stdin境界、未sign-in / API key sign-in / version不一致での事前停止、tool item・`turn.failed`・不正event・非ゼロ終了・timeout・上限超過での失敗、実行記録、workflowのrunner指定とSecret不在、ローカルCLIのsign-in検査。
 - **Completion criteria**: `python3 -m unittest discover -s tests`が成功する。
 
 ## 6. テスト方針

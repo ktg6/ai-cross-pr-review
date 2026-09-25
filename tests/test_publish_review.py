@@ -182,7 +182,8 @@ class RenderTests(PublishCase):
         comment = render_mod.render_comment(document)
         self.assertIn("### 使用量（Job Summaryのみ）", summary)
         self.assertIn(f"Claude budget USD `{limits_mod.DEFAULT_LIMITS.claude_max_budget_usd}`", summary)
-        self.assertIn(f"Codex max output tokens `{limits_mod.DEFAULT_LIMITS.codex_max_output_tokens}`", summary)
+        self.assertIn(f"Codex timeout seconds `{limits_mod.DEFAULT_LIMITS.codex_timeout_seconds}`", summary)
+        self.assertIn("API従量課金は使わない", summary)
         self.assertNotIn("使用量", comment)
         self.assertNotIn("cost USD", comment)
         self.assertNotIn("budget", comment)
@@ -230,7 +231,7 @@ class RenderTests(PublishCase):
         self.assertIn("一次レビュー(Claude): status `success`", body)
         self.assertIn("再検証(Codex): status `success`", body)
         self.assertIn("要求model `claude-opus-5` / 実使用model `claude-opus-5`", body)
-        self.assertIn("要求model `gpt-5.6-sol` / 実使用model `gpt-5.6-sol-2026-04-24`", body)
+        self.assertIn("要求model `gpt-5.6-sol` / 実使用model `-`", body)
         self.assertIn("schema `ok` / snapshot `ok`", body)
         self.assertIn("Review policy: `.github/ai-review.md` (source: `repository`", body)
 

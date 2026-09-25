@@ -53,10 +53,6 @@ inputs:
     description: Claude Code OAuth token。review stepのClaude実行stepにだけ渡す。
     required: false
     default: ""
-  openai_api_key:
-    description: OpenAI API key。codex stepのCodex実行stepにだけ渡す。
-    required: false
-    default: ""
   output_dir:
     description: 各stepの出力先。空または未存在のディレクトリであること。
     required: false
@@ -130,10 +126,6 @@ inputs:
     default: ""
   claude_token_expires_on:
     description: Claude tokenの期限（YYYY-MM-DD）。validate stepの運用チェックだけが使う。
-    required: false
-    default: ""
-  openai_key_expires_on:
-    description: OpenAI keyの期限またはrotation期日（YYYY-MM-DD）。validate stepの運用チェックだけが使う。
     required: false
     default: ""
   api_url:
@@ -263,15 +255,13 @@ runs:
         AI_REVIEW_READ_TOKEN_EXPIRES_ON: ${{ inputs.read_token_expires_on }}
         AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON: ${{ inputs.comment_token_expires_on }}
         AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON: ${{ inputs.claude_token_expires_on }}
-        AI_REVIEW_OPENAI_KEY_EXPIRES_ON: ${{ inputs.openai_key_expires_on }}
       run: |
         python3 "$GITHUB_ACTION_PATH/../../scripts/check-operations.py" \
           --claude-model "$AI_REVIEW_CLAUDE_MODEL" \
           --codex-model "$AI_REVIEW_CODEX_MODEL" \
           --read-token-expires-on "$AI_REVIEW_READ_TOKEN_EXPIRES_ON" \
           --comment-token-expires-on "$AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON" \
-          --claude-token-expires-on "$AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON" \
-          --openai-key-expires-on "$AI_REVIEW_OPENAI_KEY_EXPIRES_ON"
+          --claude-token-expires-on "$AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON"
 
     - name: Prepare review bundle
       id: prepare
@@ -344,14 +334,15 @@ runs:
           --invocation-file "$AI_REVIEW_WORKDIR/claude-invocation.json" \
           --output-dir "$AI_REVIEW_OUTPUT_DIR"
 
-    # 再検証stage。実行手段を持たないResponses API呼び出しだけを行う。
+    # 再検証stage。self-hosted runner上のCodex CLI（固定version、ChatGPTサブスクリプション
+    # でsign-in済み）をtool全無効で実行する（ADR-0012）。API keyは渡さず、API keyでの
+    # sign-inは実行前に拒否する。認証はrunnerのCODEX_HOME（未設定なら~/.codex）を使う。
     # GitHub tokenは渡さない。一次レビュー結果はuntrusted dataとして扱う。
     - name: Run verification review
       id: codex
       if: ${{ inputs.step == 'codex' }}
       shell: bash
       env:
-        OPENAI_API_KEY: ${{ inputs.openai_api_key }}
         AI_REVIEW_BUNDLE_DIR: ${{ inputs.bundle_dir }}
         AI_REVIEW_CLAUDE_RESULT: ${{ inputs.claude_result_file }}
         AI_REVIEW_OUTPUT_DIR: ${{ inputs.output_dir }}
@@ -377,7 +368,8 @@ runs:
           --output-dir "$AI_REVIEW_OUTPUT_DIR"
 
     # raw envelopeとpromptはjob間へ渡さない。artifact化されるのは正規化済み結果と
-    # 最終結果だけ。runnerはephemeralであり、明示的なrecursive deleteは行わない。
+    # 最終結果だけ。作業領域はrunner.temp配下に置き、runnerがjobの前後で空にする。
+    # 明示的なrecursive deleteは行わない。
 
     - name: Finalize review
       id: finalize

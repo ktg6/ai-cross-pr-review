@@ -10,7 +10,7 @@ GitHub Actions、Claude、Codexを利用した汎用AI PRレビュー基盤を�
 
 - `docs/plan/two-stage-cross-review-plan.md`: 現行Plan（中央実行方式、二段階レビュー）。
 - `docs/plan/implementation-plan.md`: 旧Plan（Phase 0〜4）。現行Planが置き換えた章を除き有効である。
-- `docs/adr/`: ADR-0005〜0009がAccepted。ADR-0001〜0004はSuperseded。
+- `docs/adr/`: ADR-0005〜0011がAccepted。ADR-0001〜0004はSuperseded。
 
 ## Architecture Principles
 

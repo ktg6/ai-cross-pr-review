@@ -48,8 +48,9 @@ CREDENTIALS: tuple[tuple[str, str, str], ...] = (
     ("read_token", "read token (AI_REVIEW_READ_TOKEN)", "AI_REVIEW_READ_TOKEN_EXPIRES_ON"),
     ("comment_token", "comment token (AI_REVIEW_COMMENT_TOKEN)", "AI_REVIEW_COMMENT_TOKEN_EXPIRES_ON"),
     ("claude_token", "Claude token (CLAUDE_CODE_OAUTH_TOKEN)", "AI_REVIEW_CLAUDE_TOKEN_EXPIRES_ON"),
-    ("openai_key", "OpenAI key (OPENAI_API_KEY)", "AI_REVIEW_OPENAI_KEY_EXPIRES_ON"),
 )
+# The Codex verification has no Secret to expire: it uses the ChatGPT sign-in on
+# the self-hosted runner, which the CLI refreshes in place (ADR-0012).
 
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 

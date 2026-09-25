@@ -549,8 +549,11 @@ class ProjectSkeletonTest(unittest.TestCase):
     def test_readme_describes_the_central_design_without_secrets(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         # Secret *names* and required permissions may be documented; values may not.
-        for name in ("AI_REVIEW_READ_TOKEN", "AI_REVIEW_COMMENT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"):
+        for name in ("AI_REVIEW_READ_TOKEN", "AI_REVIEW_COMMENT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
             self.assertIn(name, readme)
+        # ADR-0012: Codex runs on the ChatGPT subscription; no API key is registered.
+        self.assertIn("`OPENAI_API_KEY` も登録しない", readme)
+        self.assertIn("ai-review-codex", readme)
         for needle in ("summary_only", "pr_comment", "workflow_dispatch", "central_default", "受理"):
             self.assertIn(needle, readme)
         # The consumer-wrapper installation steps no longer apply.
